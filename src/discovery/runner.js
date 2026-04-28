@@ -71,12 +71,11 @@ export async function discoverDomain(domain, options = {}) {
   // builder (or unconditionally when forceBrowser is set).
   let html = forceBrowser ? null : await fetchHtml(contactUrl, { logger })
   let usedBrowser = false
-  if (!html || forceBrowser) {
-    if (forceBrowser) {
-      html = await fetchHtmlBrowser(contactUrl, { logger })
-      usedBrowser = true
-    }
-  } else if (!extractContactForm(html) && detectSpaBuilder(html)) {
+  if (forceBrowser) {
+    logger.info({ domain, contactUrl }, '[discovery] forceBrowser=true — fetching contact page via Playwright')
+    html = await fetchHtmlBrowser(contactUrl, { logger })
+    usedBrowser = true
+  } else if (html && !extractContactForm(html) && detectSpaBuilder(html)) {
     const builder = detectSpaBuilder(html)
     logger.info({ domain, contactUrl, builder }, '[discovery] SPA builder detected on contact page — re-fetching via Playwright')
     const rendered = await fetchHtmlBrowser(contactUrl, { logger })
@@ -86,10 +85,13 @@ export async function discoverDomain(domain, options = {}) {
     }
   }
   if (!html) {
-    logger.info({ domain, contactUrl }, '[discovery] contact page fetch failed')
+    logger.info({ domain, contactUrl, usedBrowser }, '[discovery] contact page fetch failed')
     return { status: 'failed', failureReason: 'fetch_failed', contactUrl }
   }
-  if (usedBrowser) logger.debug({ domain, contactUrl }, '[discovery] using browser-rendered HTML for extraction')
+  logger.info(
+    { domain, contactUrl, usedBrowser, htmlLength: html.length },
+    '[discovery] contact page fetched',
+  )
 
   // 3. Extract form
   const form = extractContactForm(html)
@@ -97,12 +99,19 @@ export async function discoverDomain(domain, options = {}) {
     // Distinguish between "no form" and "iframe-only builder we can't read".
     // detectFormBuilder is run again here cheaply (re-parse) only if useful.
     const isIframeBuilder = /hbspt\.forms|js\.hsforms\.net|typeform\.com/i.test(html)
+    const detectedBuilder = detectSpaBuilder(html)
     if (isIframeBuilder) {
-      logger.info({ domain, contactUrl }, '[discovery] iframe-only form builder; deferring to LLM mapper')
-      return { status: 'failed', failureReason: 'iframe_only_builder', contactUrl }
+      logger.info({ domain, contactUrl, usedBrowser }, '[discovery] iframe-only form builder; deferring to LLM mapper')
+      return { status: 'failed', failureReason: 'iframe_only_builder', contactUrl, formBuilder: detectedBuilder }
     }
-    logger.info({ domain, contactUrl }, '[discovery] no usable contact form on page')
-    return { status: 'failed', failureReason: 'no_form_found', contactUrl }
+    // Surface "we Playwright-fetched and STILL saw no <form>" — this is the
+    // case where the operator should consider a contact-URL override (the
+    // form may live on a different page than the homepage we landed on).
+    logger.info(
+      { domain, contactUrl, usedBrowser, detectedBuilder, hasFormTag: /<form\b/i.test(html) },
+      '[discovery] no usable contact form on page',
+    )
+    return { status: 'failed', failureReason: 'no_form_found', contactUrl, formBuilder: detectedBuilder }
   }
 
   // 4. Heuristic mapping first — free, fast, succeeds on plain HTML forms.

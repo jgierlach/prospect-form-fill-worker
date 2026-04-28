@@ -120,18 +120,65 @@ fastify.post('/discover/:sourcedWebsiteId', async (request, reply) => {
     .eq('id', sourcedWebsiteId)
     .maybeSingle()
   if (siteErr || !site?.domain) {
+    fastify.log.warn(
+      { sourcedWebsiteId, err: siteErr?.message },
+      '[discover] sourced_website lookup failed',
+    )
     return reply.code(404).send({ error: 'sourced_website not found' })
   }
 
-  const result = await discoverDomain(site.domain, {
-    sourcedWebsiteId: site.id,
-    supabase,
-    logger: fastify.log,
-    contactUrlOverride,
-    forceBrowser,
-  })
+  fastify.log.info(
+    { sourcedWebsiteId: site.id, domain: site.domain, contactUrlOverride, forceBrowser },
+    '[discover] starting discovery',
+  )
 
-  await persistDiscovery({ sourcedWebsiteId: site.id, result, supabase, logger: fastify.log })
+  const startedAt = Date.now()
+  let result
+  try {
+    result = await discoverDomain(site.domain, {
+      sourcedWebsiteId: site.id,
+      supabase,
+      logger: fastify.log,
+      contactUrlOverride,
+      forceBrowser,
+    })
+  } catch (err) {
+    fastify.log.error(
+      { sourcedWebsiteId: site.id, domain: site.domain, err: err instanceof Error ? err.message : String(err) },
+      '[discover] discoverDomain threw',
+    )
+    return reply.code(500).send({
+      error: 'Discovery threw an unhandled error',
+      detail: err instanceof Error ? err.message : String(err),
+    })
+  }
+
+  fastify.log.info(
+    {
+      sourcedWebsiteId: site.id,
+      domain: site.domain,
+      elapsedMs: Date.now() - startedAt,
+      status: result.status,
+      failureReason: result.status === 'failed' ? result.failureReason : null,
+      contactUrl: 'contactUrl' in result ? result.contactUrl : null,
+      formBuilder: 'formBuilder' in result ? result.formBuilder : null,
+    },
+    '[discover] discovery completed',
+  )
+
+  try {
+    await persistDiscovery({ sourcedWebsiteId: site.id, result, supabase, logger: fastify.log })
+  } catch (err) {
+    fastify.log.error(
+      { sourcedWebsiteId: site.id, err: err instanceof Error ? err.message : String(err) },
+      '[discover] persistDiscovery threw',
+    )
+    return reply.code(500).send({
+      error: 'Discovery succeeded but persistence failed',
+      detail: err instanceof Error ? err.message : String(err),
+      result,
+    })
+  }
 
   return reply.code(200).send({
     sourced_website_id: site.id,
