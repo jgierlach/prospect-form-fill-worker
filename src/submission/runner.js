@@ -4,7 +4,12 @@ import { fillForm } from './filler.js'
 import { submitForm } from './submitter.js'
 import { captureAndUpload } from '../lib/screenshots.js'
 import { claimItems } from '../queue/claim.js'
-import { completeSuccess, completeFailure, completeSkipped } from '../queue/complete.js'
+import {
+  completeSuccess,
+  completeFailure,
+  completeSkipped,
+  setWebsiteStatus,
+} from '../queue/complete.js'
 import { logStep } from '../queue/log.js'
 
 const SUBMISSION_CONCURRENCY = parseInt(process.env.SUBMISSION_CONCURRENCY || '3', 10)
@@ -62,7 +67,13 @@ async function processItem({ item, batch, supabase, logger }) {
       { itemId: item.id, sourcedWebsiteId: item.sourced_website_id, status: cache?.discovery_status },
       '[runner] no usable form_cache; skipping',
     )
-    await completeSkipped({ supabase, itemId: item.id, reason: 'no_form_cache', logger })
+    await completeSkipped({
+      supabase,
+      itemId: item.id,
+      sourcedWebsiteId: item.sourced_website_id,
+      reason: 'no_form_cache',
+      logger,
+    })
     return
   }
 
@@ -72,9 +83,25 @@ async function processItem({ item, batch, supabase, logger }) {
       { itemId: item.id, captchaType: cache.captcha_type },
       '[runner] cache marks captcha; skipping until step 9',
     )
-    await completeSkipped({ supabase, itemId: item.id, reason: 'captcha_pending', logger })
+    await completeSkipped({
+      supabase,
+      itemId: item.id,
+      sourcedWebsiteId: item.sourced_website_id,
+      reason: 'captcha_pending',
+      logger,
+    })
     return
   }
+
+  // We have a real form to fill — flip the website's status to 'processing'
+  // so the admin Queue UI accurately reflects in-flight work. (Skipped items
+  // bypass this so they never visibly transition through 'processing'.)
+  await setWebsiteStatus({
+    supabase,
+    websiteIds: [item.sourced_website_id],
+    status: 'processing',
+    logger,
+  })
 
   /** @type {import('./browser.js').BrowserSession | null} */
   let session = null
@@ -200,6 +227,7 @@ async function processItem({ item, batch, supabase, logger }) {
       await completeFailure({
         supabase,
         itemId: item.id,
+        sourcedWebsiteId: item.sourced_website_id,
         failureReason,
         attempts: item.attempts,
         maxAttempts: item.max_attempts,
@@ -224,6 +252,7 @@ async function processItem({ item, batch, supabase, logger }) {
     await completeFailure({
       supabase,
       itemId: item.id,
+      sourcedWebsiteId: item.sourced_website_id,
       failureReason: 'worker_exception',
       attempts: item.attempts,
       maxAttempts: item.max_attempts,

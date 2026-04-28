@@ -10,6 +10,33 @@ const NON_RETRYABLE_REASONS = new Set([
   'form_disappeared',
 ])
 
+/**
+ * Update sourced_websites.form_submission_status via the
+ * set_prospect_form_submission_status RPC. The RPC has a "submitted is
+ * sticky" guard, so calling this with anything other than 'submitted' on
+ * an already-submitted website is a no-op. Best-effort — never throws.
+ *
+ * @param {{
+ *   supabase: import('@supabase/supabase-js').SupabaseClient,
+ *   websiteIds: string[],
+ *   status: 'pending' | 'processing' | 'submitted' | 'failed' | 'skipped',
+ *   logger?: { warn: Function }
+ * }} args
+ */
+export async function setWebsiteStatus({ supabase, websiteIds, status, logger = console }) {
+  if (!websiteIds.length) return
+  const { error } = await supabase.rpc('set_prospect_form_submission_status', {
+    p_website_ids: websiteIds,
+    p_status: status,
+  })
+  if (error) {
+    logger.warn(
+      { websiteIds, status, err: error.message },
+      '[setWebsiteStatus] RPC failed (non-fatal)',
+    )
+  }
+}
+
 /** Backoff schedule per spec §7.9. Indexed by attempts already made. */
 const BACKOFF_SECONDS = [5 * 60, 30 * 60]
 
@@ -70,17 +97,23 @@ export async function completeSuccess({
   // Bump batch counter
   await incrementBatchCounter(supabase, itemId, 'succeeded', logger)
 
-  // Dedup-mark sourced_websites — but NOT in dry-run mode (spec §7.11)
-  if (!isDryRun) {
-    const { error: rpcErr } = await supabase.rpc('mark_prospect_form_submitted', {
-      p_website_ids: [sourcedWebsiteId],
-    })
-    if (rpcErr) {
-      logger.warn(
-        { itemId, sourcedWebsiteId, err: rpcErr.message },
-        '[complete:success] mark_prospect_form_submitted RPC failed (non-fatal)',
-      )
-    }
+  if (isDryRun) {
+    // Dry run validates the pipeline but leaves the website addressable for a
+    // real submission later — return it to the Pending queue.
+    await setWebsiteStatus({ supabase, websiteIds: [sourcedWebsiteId], status: 'pending', logger })
+    return
+  }
+
+  // Live success: mark_prospect_form_submitted sets form_submitted_at +
+  // form_submission_status='submitted' atomically (sticky guard inside the RPC).
+  const { error: rpcErr } = await supabase.rpc('mark_prospect_form_submitted', {
+    p_website_ids: [sourcedWebsiteId],
+  })
+  if (rpcErr) {
+    logger.warn(
+      { itemId, sourcedWebsiteId, err: rpcErr.message },
+      '[complete:success] mark_prospect_form_submitted RPC failed (non-fatal)',
+    )
   }
 }
 
@@ -98,6 +131,7 @@ export async function completeSuccess({
 export async function completeFailure({
   supabase,
   itemId,
+  sourcedWebsiteId,
   failureReason,
   attempts,
   maxAttempts,
@@ -123,6 +157,17 @@ export async function completeFailure({
   if (status === 'failed') {
     await incrementBatchCounter(supabase, itemId, 'failed', logger)
   }
+
+  // Mirror the item's terminal state to the website. Retryable failures go
+  // back to 'pending' (still actionable in the Queue for the next attempt).
+  if (sourcedWebsiteId) {
+    await setWebsiteStatus({
+      supabase,
+      websiteIds: [sourcedWebsiteId],
+      status: status === 'failed' ? 'failed' : 'pending',
+      logger,
+    })
+  }
 }
 
 /**
@@ -133,7 +178,13 @@ export async function completeFailure({
  *   logger?: { info: Function, warn: Function }
  * }} args
  */
-export async function completeSkipped({ supabase, itemId, reason, logger = console }) {
+export async function completeSkipped({
+  supabase,
+  itemId,
+  sourcedWebsiteId,
+  reason,
+  logger = console,
+}) {
   const now = new Date().toISOString()
   const { error } = await supabase
     .from('prospect_form_submission_batch_items')
@@ -147,6 +198,14 @@ export async function completeSkipped({ supabase, itemId, reason, logger = conso
     .eq('id', itemId)
   if (error) throw new Error(`[complete:skipped] update failed: ${error.message}`)
   await incrementBatchCounter(supabase, itemId, 'skipped', logger)
+  if (sourcedWebsiteId) {
+    await setWebsiteStatus({
+      supabase,
+      websiteIds: [sourcedWebsiteId],
+      status: 'skipped',
+      logger,
+    })
+  }
 }
 
 /**

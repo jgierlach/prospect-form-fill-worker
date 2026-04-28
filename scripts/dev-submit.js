@@ -58,12 +58,22 @@ async function main() {
 
   if (!cache || cache.discovery_status !== 'success') {
     console.error('[dev-submit] no usable form_cache for this website')
-    await completeSkipped({ supabase, itemId, reason: 'no_form_cache' })
+    await completeSkipped({
+      supabase,
+      itemId,
+      sourcedWebsiteId: item.sourced_website_id,
+      reason: 'no_form_cache',
+    })
     process.exit(1)
   }
   if (cache.captcha_type) {
     console.error(`[dev-submit] cache marks captcha (${cache.captcha_type}); skipping until step 9`)
-    await completeSkipped({ supabase, itemId, reason: 'captcha_pending' })
+    await completeSkipped({
+      supabase,
+      itemId,
+      sourcedWebsiteId: item.sourced_website_id,
+      reason: 'captcha_pending',
+    })
     process.exit(0)
   }
 
@@ -98,7 +108,7 @@ async function main() {
         screenshotPath: preSubmitPath ?? beforePath ?? null,
         isDryRun: true,
       })
-      console.log('[dev-submit] dry-run success — item marked, sourced_websites NOT marked')
+      console.log('[dev-submit] dry-run success — item marked, sourced_website reset to pending')
       return
     }
 
@@ -128,6 +138,7 @@ async function main() {
       await completeFailure({
         supabase,
         itemId,
+        sourcedWebsiteId: item.sourced_website_id,
         failureReason,
         attempts: item.attempts,
         maxAttempts: item.max_attempts,
