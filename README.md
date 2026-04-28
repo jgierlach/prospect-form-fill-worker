@@ -8,16 +8,21 @@ Build spec: `admin-core-labs/PROSPECT_FORM_FILL_PROMPT.md`.
 
 ## Status
 
-Currently at **step 3 of the build order — skeleton only**.
+Through **step 7 of the build order** — discovery + submission + Decodo wired.
 
 What works today:
 - `GET /health` → `{ status: "ok" }`, no auth.
-- `POST /batches/:id/run` → bearer-auth, validates id, returns `202` and logs.
-  No submission work runs yet (step 5).
+- `POST /batches/:id/run` → bearer-auth, claims items, runs Playwright form-fill,
+  writes results.
+- Discovery CLI: `npm run dev:discover <domain>` (heuristic mapper).
+- Submission CLI: `npm run dev:submit <item_id>` for single-item iteration.
+- Residential proxy via Decodo (sticky session per submission, response bytes
+  tracked into `proxy_bytes_used`). Proxy is **optional** — without
+  `DECODO_USERNAME`/`PASSWORD` set, traffic uses the box's IP (fine for
+  smoke testing, useless against real prospect WAFs).
 
-Discovery (step 4), Decodo + Playwright (step 7), LLM field-mapping (step 8),
-2Captcha (step 9), retries, screenshots, and Docker/systemd packaging all land
-in later steps.
+LLM field-mapping (step 8), 2Captcha (step 9), and Docker/systemd packaging
+land in later steps.
 
 ## Local dev
 
@@ -45,8 +50,18 @@ curl -X POST http://localhost:3000/batches/abc-123/run \
 ## Environment variables
 
 See `.env.example` for the canonical list. As features land in subsequent build
-steps, more vars will be added (Anthropic, Decodo, 2Captcha, sender identity is
-in admin-core-labs not here).
+steps, more vars will be added (Anthropic for LLM mapping, 2Captcha; sender
+identity stays in admin-core-labs, not here).
+
+| Var | Purpose |
+|---|---|
+| `SUPABASE_URL` | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Bypasses RLS — worker writes go through this |
+| `API_TOKEN` | Bearer expected on `/batches/:id/run` from admin panel |
+| `PORT` | HTTP listen port (default `3000`) |
+| `LOG_LEVEL` | Pino level (`info`, `debug`, etc.) |
+| `DECODO_USERNAME` / `DECODO_PASSWORD` | Optional; without these, no proxy |
+| `DECODO_HOST` / `DECODO_PORT` | Default `gate.decodo.com:10001` |
 
 | Var | Purpose |
 |---|---|

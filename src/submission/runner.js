@@ -113,7 +113,12 @@ async function processItem({ item, batch, supabase, logger }) {
       itemId: item.id,
       step: 'browser_launched',
       status: 'ok',
-      metadata: { userAgent: session.userAgent, viewport: session.viewport },
+      metadata: {
+        userAgent: session.userAgent,
+        viewport: session.viewport,
+        proxyEnabled: session.proxyEnabled,
+        sessionId: session.sessionId,
+      },
     })
 
     // 3. Navigate
@@ -176,10 +181,14 @@ async function processItem({ item, batch, supabase, logger }) {
         sourcedWebsiteId: item.sourced_website_id,
         successIndicator: 'dry_run',
         screenshotPath: preSubmitPath ?? beforePath ?? null,
+        proxyBytesUsed: session.getBytesUsed(),
         isDryRun: true,
         logger,
       })
-      logger.info({ itemId: item.id, elapsedMs: Date.now() - t0 }, '[runner] dry-run success')
+      logger.info(
+        { itemId: item.id, elapsedMs: Date.now() - t0, proxyBytes: session.getBytesUsed() },
+        '[runner] dry-run success',
+      )
       return
     }
 
@@ -210,6 +219,8 @@ async function processItem({ item, batch, supabase, logger }) {
       logger,
     })
 
+    const proxyBytesUsed = session.getBytesUsed()
+
     // 10. Complete based on outcome
     if (outcome.status === 'success') {
       await completeSuccess({
@@ -218,6 +229,7 @@ async function processItem({ item, batch, supabase, logger }) {
         sourcedWebsiteId: item.sourced_website_id,
         successIndicator: outcome.indicator,
         screenshotPath: afterPath ?? preSubmitPath ?? null,
+        proxyBytesUsed,
         isDryRun: false,
         logger,
       })
@@ -232,11 +244,15 @@ async function processItem({ item, batch, supabase, logger }) {
         attempts: item.attempts,
         maxAttempts: item.max_attempts,
         screenshotPath: afterPath ?? preSubmitPath ?? null,
+        proxyBytesUsed,
         logger,
       })
     }
 
-    logger.info({ itemId: item.id, outcome, elapsedMs: Date.now() - t0 }, '[runner] item complete')
+    logger.info(
+      { itemId: item.id, outcome, elapsedMs: Date.now() - t0, proxyBytes: proxyBytesUsed },
+      '[runner] item complete',
+    )
   } catch (err) {
     logger.error(
       { itemId: item.id, err: err instanceof Error ? err.message : String(err) },
@@ -256,6 +272,7 @@ async function processItem({ item, batch, supabase, logger }) {
       failureReason: 'worker_exception',
       attempts: item.attempts,
       maxAttempts: item.max_attempts,
+      proxyBytesUsed: session?.getBytesUsed() ?? null,
       logger,
     })
   } finally {

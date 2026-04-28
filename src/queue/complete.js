@@ -65,6 +65,7 @@ function decideRetry(failureReason, attempts, maxAttempts) {
  *   sourcedWebsiteId: string,
  *   successIndicator: string,
  *   screenshotPath?: string | null,
+ *   proxyBytesUsed?: number | null,
  *   isDryRun: boolean,
  *   logger?: { info: Function, warn: Function }
  * }} args
@@ -75,6 +76,7 @@ export async function completeSuccess({
   sourcedWebsiteId,
   successIndicator,
   screenshotPath = null,
+  proxyBytesUsed = null,
   isDryRun,
   logger = console,
 }) {
@@ -87,6 +89,7 @@ export async function completeSuccess({
       success_indicator: successIndicator,
       failure_reason: null,
       screenshot_url: screenshotPath,
+      proxy_bytes_used: proxyBytesUsed,
       worker_id: null,
       next_attempt_at: null,
       updated_at: now,
@@ -121,10 +124,12 @@ export async function completeSuccess({
  * @param {{
  *   supabase: import('@supabase/supabase-js').SupabaseClient,
  *   itemId: string,
+ *   sourcedWebsiteId?: string | null,
  *   failureReason: string,
  *   attempts: number,
  *   maxAttempts: number,
  *   screenshotPath?: string | null,
+ *   proxyBytesUsed?: number | null,
  *   logger?: { info: Function, warn: Function }
  * }} args
  */
@@ -136,6 +141,7 @@ export async function completeFailure({
   attempts,
   maxAttempts,
   screenshotPath = null,
+  proxyBytesUsed = null,
   logger = console,
 }) {
   const { status, nextAttemptAt } = decideRetry(failureReason, attempts, maxAttempts)
@@ -146,6 +152,7 @@ export async function completeFailure({
       status,
       failure_reason: failureReason,
       screenshot_url: screenshotPath,
+      proxy_bytes_used: proxyBytesUsed,
       next_attempt_at: nextAttemptAt,
       // worker_id only cleared when we're done (terminal failed) or about to retry
       worker_id: null,

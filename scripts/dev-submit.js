@@ -106,9 +106,12 @@ async function main() {
         sourcedWebsiteId: item.sourced_website_id,
         successIndicator: 'dry_run',
         screenshotPath: preSubmitPath ?? beforePath ?? null,
+        proxyBytesUsed: session.getBytesUsed(),
         isDryRun: true,
       })
-      console.log('[dev-submit] dry-run success — item marked, sourced_website reset to pending')
+      console.log(
+        `[dev-submit] dry-run success — item marked, sourced_website reset to pending, proxyBytes=${session.getBytesUsed()}`,
+      )
       return
     }
 
@@ -123,6 +126,7 @@ async function main() {
     const afterPath = await captureAndUpload({ page: session.page, supabase, itemId, label: 'after' })
     console.log(`[dev-submit] after screenshot → ${afterPath}`)
 
+    const proxyBytesUsed = session.getBytesUsed()
     if (outcome.status === 'success') {
       await completeSuccess({
         supabase,
@@ -130,6 +134,7 @@ async function main() {
         sourcedWebsiteId: item.sourced_website_id,
         successIndicator: outcome.indicator,
         screenshotPath: afterPath ?? null,
+        proxyBytesUsed,
         isDryRun: false,
       })
     } else {
@@ -143,6 +148,7 @@ async function main() {
         attempts: item.attempts,
         maxAttempts: item.max_attempts,
         screenshotPath: afterPath ?? null,
+        proxyBytesUsed,
       })
     }
   } finally {
