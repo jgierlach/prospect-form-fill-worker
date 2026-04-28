@@ -1,3 +1,9 @@
+// MUST stay first — populates process.env before any module that reads it
+// (supabase.js, runner.js) is imported. Without this, pm2 only sees env vars
+// the user has exported into the shell before `pm2 start`, which is fragile
+// and bit us once already on a fresh box.
+import 'dotenv/config'
+
 import Fastify from 'fastify'
 import secureJsonParse from 'secure-json-parse'
 import { supabase, supabaseEnabled } from './supabase.js'

@@ -9,6 +9,7 @@
  * a full batch.
  */
 
+import 'dotenv/config'
 import { supabase, supabaseEnabled } from '../src/supabase.js'
 import { launchSession, closeSession } from '../src/submission/browser.js'
 import { fillForm } from '../src/submission/filler.js'

@@ -9,6 +9,7 @@
  * Step 4 demo. Heuristic mapper only (no LLM).
  */
 
+import 'dotenv/config'
 import { discoverDomain, persistDiscovery } from '../src/discovery/runner.js'
 import { supabase, supabaseEnabled } from '../src/supabase.js'
 
