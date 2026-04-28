@@ -1,6 +1,7 @@
 import Fastify from 'fastify'
 import secureJsonParse from 'secure-json-parse'
-import { supabaseEnabled } from './supabase.js'
+import { supabase, supabaseEnabled } from './supabase.js'
+import { runSubmissionBatch } from './submission/runner.js'
 
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const API_TOKEN = process.env.API_TOKEN || ''
@@ -48,8 +49,9 @@ fastify.get('/health', async () => {
  * Wakes the submission worker for a prospect-form-fill batch. Returns 202
  * immediately; the worker owns the batch lifecycle from this point.
  *
- * Step 3 (skeleton): validates auth + batch id, logs, returns 202. The actual
- * submission runner lands in step 5.
+ * Fire-and-forget pattern matches email-verification-service. Errors inside
+ * runSubmissionBatch get logged + per-item failure rows; the HTTP response
+ * already left the building.
  */
 fastify.post('/batches/:id/run', async (request, reply) => {
   if (!supabaseEnabled) {
@@ -61,7 +63,12 @@ fastify.post('/batches/:id/run', async (request, reply) => {
     return reply.code(400).send({ error: 'Batch id is required' })
   }
 
-  fastify.log.info({ batchId: id }, '[run] batch trigger received (no-op until submission runner lands)')
+  runSubmissionBatch({ batchId: id, supabase, logger: fastify.log }).catch((err) => {
+    fastify.log.error(
+      { batchId: id, err: err instanceof Error ? err.message : String(err) },
+      'Submission runner threw synchronously',
+    )
+  })
 
   return reply.code(202).send({ batch_id: id, status: 'accepted' })
 })

@@ -6,12 +6,14 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "dev:discover": "node scripts/dev-discover.js"
+    "dev:discover": "node scripts/dev-discover.js",
+    "dev:submit": "node scripts/dev-submit.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
     "cheerio": "^1.0.0",
     "fastify": "^5.3.3",
+    "playwright": "^1.50.0",
     "secure-json-parse": "^4.1.0"
   }
 }
