@@ -1,4 +1,6 @@
 import { fetchHtml } from '../lib/fetchHtml.js'
+import { fetchHtmlBrowser } from '../lib/fetchHtmlBrowser.js'
+import { detectSpaBuilder } from '../lib/spaDetector.js'
 import { resolveContactUrl } from './crawler.js'
 import { extractContactForm } from './extractor.js'
 import { mapFields } from './field-mapper.js'
@@ -32,7 +34,9 @@ import { detectCaptcha } from './captcha-detector.js'
  * @typedef {{
  *   sourcedWebsiteId?: string | null,
  *   supabase?: import('@supabase/supabase-js').SupabaseClient | null,
- *   logger?: Logger
+ *   logger?: Logger,
+ *   contactUrlOverride?: string | null,
+ *   forceBrowser?: boolean
  * }} DiscoverOptions
  */
 
@@ -47,20 +51,45 @@ import { detectCaptcha } from './captcha-detector.js'
  */
 export async function discoverDomain(domain, options = {}) {
   const logger = options.logger ?? console
+  const forceBrowser = options.forceBrowser === true
 
-  // 1. Resolve contact URL
-  const contactUrl = await resolveContactUrl(domain, options)
-  if (!contactUrl) {
-    logger.info({ domain }, '[discovery] no contact page found')
-    return { status: 'failed', failureReason: 'no_contact_page' }
+  // 1. Resolve contact URL — operator override skips crawling entirely.
+  let contactUrl
+  if (options.contactUrlOverride) {
+    contactUrl = options.contactUrlOverride
+    logger.info({ domain, contactUrl }, '[discovery] using operator-provided contactUrlOverride')
+  } else {
+    contactUrl = await resolveContactUrl(domain, options)
+    if (!contactUrl) {
+      logger.info({ domain }, '[discovery] no contact page found')
+      return { status: 'failed', failureReason: 'no_contact_page' }
+    }
   }
 
-  // 2. Fetch the contact page (resolveContactUrl may have fetched but didn't return body)
-  const html = await fetchHtml(contactUrl, { logger })
+  // 2. Fetch the contact page. Mirrors crawler's smart-fetch: try static
+  // first, escalate to Playwright when fingerprint suggests a JS-rendered
+  // builder (or unconditionally when forceBrowser is set).
+  let html = forceBrowser ? null : await fetchHtml(contactUrl, { logger })
+  let usedBrowser = false
+  if (!html || forceBrowser) {
+    if (forceBrowser) {
+      html = await fetchHtmlBrowser(contactUrl, { logger })
+      usedBrowser = true
+    }
+  } else if (!extractContactForm(html) && detectSpaBuilder(html)) {
+    const builder = detectSpaBuilder(html)
+    logger.info({ domain, contactUrl, builder }, '[discovery] SPA builder detected on contact page — re-fetching via Playwright')
+    const rendered = await fetchHtmlBrowser(contactUrl, { logger })
+    if (rendered) {
+      html = rendered
+      usedBrowser = true
+    }
+  }
   if (!html) {
     logger.info({ domain, contactUrl }, '[discovery] contact page fetch failed')
     return { status: 'failed', failureReason: 'fetch_failed', contactUrl }
   }
+  if (usedBrowser) logger.debug({ domain, contactUrl }, '[discovery] using browser-rendered HTML for extraction')
 
   // 3. Extract form
   const form = extractContactForm(html)

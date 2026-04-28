@@ -1,5 +1,7 @@
 import * as cheerio from 'cheerio'
 import { fetchHtml } from '../lib/fetchHtml.js'
+import { fetchHtmlBrowser } from '../lib/fetchHtmlBrowser.js'
+import { detectSpaBuilder } from '../lib/spaDetector.js'
 
 /**
  * URL-path scoring for contact-likely pages. Mirrors the email-verification
@@ -25,9 +27,35 @@ const CONTACT_LINK_TEXT = /\b(contact|get in touch|reach out|connect with us)\b/
  * @typedef {{
  *   sourcedWebsiteId?: string | null,
  *   supabase?: import('@supabase/supabase-js').SupabaseClient | null,
- *   logger?: { info: (...args: unknown[]) => void, debug: (...args: unknown[]) => void, warn: (...args: unknown[]) => void }
+ *   logger?: { info: (...args: unknown[]) => void, debug: (...args: unknown[]) => void, warn: (...args: unknown[]) => void },
+ *   forceBrowser?: boolean
  * }} ResolveOptions
  */
+
+/**
+ * Static-HTML fetch with a one-shot Playwright fallback when the page
+ * fingerprints as a JS-rendered builder. `forceBrowser` skips the static
+ * attempt entirely — the operator override.
+ *
+ * @param {string} url
+ * @param {ResolveOptions} options
+ * @returns {Promise<string | null>}
+ */
+async function fetchHtmlSmart(url, options) {
+  const logger = options.logger ?? console
+  if (options.forceBrowser) {
+    logger.debug?.({ url }, '[crawler] forceBrowser=true — fetching via Playwright')
+    return await fetchHtmlBrowser(url, { logger })
+  }
+  const html = await fetchHtml(url, { logger })
+  if (!html) return null
+  if (looksLikeFormPage(html)) return html
+  const builder = detectSpaBuilder(html)
+  if (!builder) return html
+  logger.info?.({ url, builder }, '[crawler] SPA builder detected without static form — escalating to Playwright')
+  const rendered = await fetchHtmlBrowser(url, { logger })
+  return rendered ?? html
+}
 
 /**
  * @param {string} href
@@ -131,7 +159,7 @@ export async function resolveContactUrl(domain, options = {}) {
     if (error) {
       logger.warn({ sourcedWebsiteId, err: error.message }, '[crawler] sourced_websites lookup failed')
     } else if (data?.contact_page_url) {
-      const html = await fetchHtml(data.contact_page_url, { logger })
+      const html = await fetchHtmlSmart(data.contact_page_url, options)
       if (html && looksLikeFormPage(html)) {
         logger.debug({ domain, url: data.contact_page_url }, '[crawler] using cached contact_page_url')
         return data.contact_page_url
@@ -149,12 +177,12 @@ export async function resolveContactUrl(domain, options = {}) {
     return null
   }
 
-  const homepageHtml = await fetchHtml(homepageUrl, { logger })
+  const homepageHtml = await fetchHtmlSmart(homepageUrl, options)
   if (!homepageHtml) return null
 
   const candidates = pickContactCandidates(homepageHtml, baseUrl).slice(0, 4)
   for (const candidate of candidates) {
-    const html = await fetchHtml(candidate, { logger })
+    const html = await fetchHtmlSmart(candidate, options)
     if (html && looksLikeFormPage(html)) return candidate
   }
 
@@ -171,14 +199,16 @@ export async function resolveContactUrl(domain, options = {}) {
   ]
   for (const path of probedPaths) {
     const url = new URL(path, baseUrl).toString()
-    const html = await fetchHtml(url, { logger })
+    const html = await fetchHtmlSmart(url, options)
     if (html && looksLikeFormPage(html)) {
       logger.debug({ domain, url }, '[crawler] direct-path probe hit')
       return url
     }
   }
 
-  // 4. Homepage itself as last resort
+  // 4. Homepage itself as last resort. The smart-fetch above may have already
+  // upgraded homepageHtml to the rendered Wix/Squarespace DOM, so this catch
+  // recovers homepage-form sites the candidate loop missed.
   if (looksLikeFormPage(homepageHtml)) return homepageUrl
 
   return null

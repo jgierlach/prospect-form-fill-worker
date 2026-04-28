@@ -8,6 +8,7 @@ import Fastify from 'fastify'
 import secureJsonParse from 'secure-json-parse'
 import { supabase, supabaseEnabled } from './supabase.js'
 import { runSubmissionBatch, recoverOnStartup } from './submission/runner.js'
+import { discoverDomain, persistDiscovery } from './discovery/runner.js'
 
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const API_TOKEN = process.env.API_TOKEN || ''
@@ -77,6 +78,66 @@ fastify.post('/batches/:id/run', async (request, reply) => {
   })
 
   return reply.code(202).send({ batch_id: id, status: 'accepted' })
+})
+
+/**
+ * POST /discover/:sourcedWebsiteId
+ * Synchronous (re-)discovery for a single sourced_website. Used by the admin
+ * "Re-run discovery" UI when an operator wants to override the crawler — for
+ * example, pointing it at a homepage with a JS-rendered Wix form, or pasting
+ * a deep-linked /contact URL the heuristic crawler missed.
+ *
+ * Body (all optional):
+ *   - contactUrlOverride: string  — skip resolveContactUrl, use this URL
+ *   - forceBrowser:       boolean — always fetch via Playwright (Wix etc.)
+ *
+ * Returns 200 with the persisted discovery result. Synchronous because the
+ * UI shows the outcome immediately; a single discovery run is fast enough
+ * (a few seconds — tens of seconds with --forceBrowser).
+ */
+fastify.post('/discover/:sourcedWebsiteId', async (request, reply) => {
+  if (!supabaseEnabled) {
+    return reply.code(500).send({ error: 'Worker not configured (missing SUPABASE env vars)' })
+  }
+
+  const { sourcedWebsiteId } = /** @type {{ sourcedWebsiteId: string }} */ (request.params)
+  if (!sourcedWebsiteId) {
+    return reply.code(400).send({ error: 'sourcedWebsiteId is required' })
+  }
+
+  const body = /** @type {{ contactUrlOverride?: string, forceBrowser?: boolean }} */ (
+    request.body ?? {}
+  )
+  const contactUrlOverride =
+    typeof body.contactUrlOverride === 'string' && body.contactUrlOverride.trim()
+      ? body.contactUrlOverride.trim()
+      : null
+  const forceBrowser = body.forceBrowser === true
+
+  const { data: site, error: siteErr } = await supabase
+    .from('sourced_websites')
+    .select('id, domain')
+    .eq('id', sourcedWebsiteId)
+    .maybeSingle()
+  if (siteErr || !site?.domain) {
+    return reply.code(404).send({ error: 'sourced_website not found' })
+  }
+
+  const result = await discoverDomain(site.domain, {
+    sourcedWebsiteId: site.id,
+    supabase,
+    logger: fastify.log,
+    contactUrlOverride,
+    forceBrowser,
+  })
+
+  await persistDiscovery({ sourcedWebsiteId: site.id, result, supabase, logger: fastify.log })
+
+  return reply.code(200).send({
+    sourced_website_id: site.id,
+    domain: site.domain,
+    result,
+  })
 })
 
 const start = async () => {
