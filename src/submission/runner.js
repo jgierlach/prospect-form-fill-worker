@@ -379,9 +379,63 @@ async function processItemBounded(args) {
   }
 }
 
+// How long to sleep between checks when the batch has retry-pending items
+// not yet due. Capped so we re-check batch status (cancellation) regularly.
+const RETRY_WAIT_CAP_MS = 120_000  // 2 min
+const RETRY_WAIT_FLOOR_MS = 5_000   // 5 sec — avoid tight-spinning on near-due retries
+
 /**
- * Main entry: drain a batch's pending items via N concurrent worker tasks.
- * Returns when the queue empties (or after a configurable empty-poll cap).
+ * Are there any pending items left in this batch (claimable now or sleeping
+ * for retry)? Returns the earliest next_attempt_at if items are sleeping.
+ * Uses one query so a concurrently-drained queue cannot look pending with no
+ * remaining row. Throws on database errors so a failed read never looks like
+ * an empty queue.
+ *
+ * @param {{
+ *   supabase: import('@supabase/supabase-js').SupabaseClient,
+ *   batchId: string
+ * }} args
+ * @returns {Promise<{ hasPending: boolean, nextDueAt: string | null }>}
+ */
+async function batchPendingState({ supabase, batchId }) {
+  const { data: nextDue, error } = await supabase
+    .from('prospect_form_submission_batch_items')
+    .select('next_attempt_at')
+    .eq('batch_id', batchId)
+    .eq('status', 'pending')
+    .order('next_attempt_at', { ascending: true, nullsFirst: true })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw new Error(`[runner] pending-state query failed: ${error.message}`)
+  if (!nextDue) return { hasPending: false, nextDueAt: null }
+  return { hasPending: true, nextDueAt: nextDue.next_attempt_at ?? null }
+}
+
+/**
+ * @param {{
+ *   supabase: import('@supabase/supabase-js').SupabaseClient,
+ *   batchId: string
+ * }} args
+ * @returns {Promise<'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | null>}
+ */
+async function readBatchStatus({ supabase, batchId }) {
+  const { data } = await supabase
+    .from('prospect_form_submission_batches')
+    .select('status')
+    .eq('id', batchId)
+    .maybeSingle()
+  return data?.status ?? null
+}
+
+/**
+ * Main entry: own a batch through its full lifecycle. Keeps polling until
+ * every item is terminal (success / failed / skipped) — including waiting
+ * for retry-backoff sleeps. Exits cleanly on cancellation.
+ *
+ * Idempotent enough to be called from both the HTTP trigger and from
+ * recoverOnStartup. The claim RPC's FOR UPDATE SKIP LOCKED keeps two
+ * concurrent runners from double-processing, so a double-call is wasted CPU
+ * not data corruption.
  *
  * @param {{
  *   batchId: string,
@@ -414,12 +468,19 @@ export async function runSubmissionBatch({ batchId, supabase, logger }) {
 
   const t0 = Date.now()
   let processed = 0
-  let consecutiveEmptyPolls = 0
-  const MAX_EMPTY_POLLS = 3
+  let cancelled = false
 
   /** @returns {Promise<void>} */
   const workerLoop = async () => {
-    while (consecutiveEmptyPolls < MAX_EMPTY_POLLS) {
+    while (!cancelled) {
+      // Cheap status check before each claim — admin cancellation should
+      // stop us within a couple of seconds.
+      const status = await readBatchStatus({ supabase, batchId })
+      if (status === 'cancelled') {
+        cancelled = true
+        break
+      }
+
       let claimed
       try {
         claimed = await claimItems({ supabase, batchId, limit: 1, workerId: WORKER_ID })
@@ -429,33 +490,110 @@ export async function runSubmissionBatch({ batchId, supabase, logger }) {
         continue
       }
 
-      if (claimed.length === 0) {
-        consecutiveEmptyPolls++
-        await new Promise((r) => setTimeout(r, 500))
+      if (claimed.length > 0) {
+        for (const item of claimed) {
+          await processItemBounded({ item, batch: { id: batch.id, dry_run: batch.dry_run }, supabase, logger })
+          processed++
+        }
         continue
       }
-      consecutiveEmptyPolls = 0
 
-      for (const item of claimed) {
-        await processItemBounded({ item, batch: { id: batch.id, dry_run: batch.dry_run }, supabase, logger })
-        processed++
+      // Empty claim. Either the batch is genuinely drained, or items are
+      // sleeping for retry backoff. Decide which.
+      let pendingState
+      try {
+        pendingState = await batchPendingState({ supabase, batchId })
+      } catch (err) {
+        logger.error(
+          { batchId, err: err instanceof Error ? err.message : String(err) },
+          '[runner] pending-state check failed',
+        )
+        await new Promise((r) => setTimeout(r, 1000))
+        continue
       }
+
+      const { hasPending, nextDueAt } = pendingState
+      if (!hasPending) break
+
+      // Sleep until the earliest retry is due (or RETRY_WAIT_CAP_MS, whichever
+      // is smaller — we want to re-check cancellation regularly).
+      const dueMs = nextDueAt ? new Date(nextDueAt).getTime() - Date.now() : RETRY_WAIT_CAP_MS
+      const sleepMs = Math.max(RETRY_WAIT_FLOOR_MS, Math.min(RETRY_WAIT_CAP_MS, dueMs))
+      logger.debug?.(
+        { batchId, sleepMs, nextDueAt },
+        '[runner] queue empty but retries pending; sleeping',
+      )
+      await new Promise((r) => setTimeout(r, sleepMs))
     }
   }
 
-  await Promise.all(
-    Array.from({ length: SUBMISSION_CONCURRENCY }, () => workerLoop()),
-  )
+  await Promise.all(Array.from({ length: SUBMISSION_CONCURRENCY }, () => workerLoop()))
 
-  await supabase
-    .from('prospect_form_submission_batches')
-    .update({ status: 'completed', updated_at: new Date().toISOString() })
-    .eq('id', batchId)
+  // Don't flip cancelled batches back to completed.
+  if (!cancelled) {
+    await supabase
+      .from('prospect_form_submission_batches')
+      .update({ status: 'completed', updated_at: new Date().toISOString() })
+      .eq('id', batchId)
+  }
 
   logger.info(
-    { batchId, processed, elapsedMs: Date.now() - t0 },
-    '[runner] batch complete',
+    { batchId, processed, elapsedMs: Date.now() - t0, cancelled },
+    '[runner] batch terminal',
   )
+}
+
+/**
+ * On worker startup, find any batches stuck in 'running' state — those were
+ * being processed when the previous process exited (deploy, crash, oom, etc.)
+ * — and relaunch runSubmissionBatch for each. The reaper RPC separately
+ * re-queues items whose claim went stale.
+ *
+ * Fire-and-forget: each batch runs in its own promise. Don't await; that'd
+ * block index.js startup until every recovered batch drained.
+ *
+ * @param {{
+ *   supabase: import('@supabase/supabase-js').SupabaseClient,
+ *   logger: { info: Function, debug: Function, warn: Function, error: Function }
+ * }} args
+ */
+export async function recoverOnStartup({ supabase, logger }) {
+  // Free any items whose worker died mid-claim. Without this, those items
+  // sit in 'processing' status forever and never get retried.
+  try {
+    const { data: reclaimedCount } = await supabase.rpc('reclaim_stale_prospect_form_submission_items')
+    if (reclaimedCount && Number(reclaimedCount) > 0) {
+      logger.info({ reclaimedCount }, '[runner] reclaimed stale processing items on startup')
+    }
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      '[runner] reclaim_stale RPC failed on startup — continuing',
+    )
+  }
+
+  const { data: stuck, error } = await supabase
+    .from('prospect_form_submission_batches')
+    .select('id')
+    .eq('status', 'running')
+  if (error) {
+    logger.error({ err: error.message }, '[runner] startup recovery: batch query failed')
+    return
+  }
+  if (!stuck || stuck.length === 0) {
+    logger.info('[runner] startup recovery: no batches in flight')
+    return
+  }
+
+  logger.info({ count: stuck.length, batchIds: stuck.map((b) => b.id) }, '[runner] resuming in-flight batches')
+  for (const batch of stuck) {
+    runSubmissionBatch({ batchId: batch.id, supabase, logger }).catch((err) => {
+      logger.error(
+        { batchId: batch.id, err: err instanceof Error ? err.message : String(err) },
+        '[runner] resumed batch threw',
+      )
+    })
+  }
 }
 
 export const __testables = { WORKER_ID, SUBMISSION_CONCURRENCY }

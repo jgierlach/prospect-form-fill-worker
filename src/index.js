@@ -7,7 +7,7 @@ import 'dotenv/config'
 import Fastify from 'fastify'
 import secureJsonParse from 'secure-json-parse'
 import { supabase, supabaseEnabled } from './supabase.js'
-import { runSubmissionBatch } from './submission/runner.js'
+import { runSubmissionBatch, recoverOnStartup } from './submission/runner.js'
 
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const API_TOKEN = process.env.API_TOKEN || ''
@@ -83,6 +83,18 @@ const start = async () => {
   try {
     await fastify.listen({ port: PORT, host: '0.0.0.0' })
     fastify.log.info(`Prospect form-fill worker listening on port ${PORT}`)
+
+    // Resume any batches that were running when the previous process exited.
+    // Fire-and-forget — recoverOnStartup spawns long-running runSubmissionBatch
+    // tasks per recovered batch and we don't want to block HTTP listening.
+    if (supabaseEnabled) {
+      recoverOnStartup({ supabase, logger: fastify.log }).catch((err) => {
+        fastify.log.error(
+          { err: err instanceof Error ? err.message : String(err) },
+          'Startup recovery threw',
+        )
+      })
+    }
   } catch (err) {
     fastify.log.error(err)
     process.exit(1)

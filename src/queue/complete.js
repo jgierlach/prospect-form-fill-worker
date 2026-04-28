@@ -187,6 +187,7 @@ export async function completeFailure({
  * @param {{
  *   supabase: import('@supabase/supabase-js').SupabaseClient,
  *   itemId: string,
+ *   sourcedWebsiteId?: string | null,
  *   reason: string,
  *   logger?: { info: Function, warn: Function }
  * }} args
