@@ -2,6 +2,7 @@ import { fetchHtml } from '../lib/fetchHtml.js'
 import { resolveContactUrl } from './crawler.js'
 import { extractContactForm } from './extractor.js'
 import { mapFields } from './field-mapper.js'
+import { mapFieldsViaLLM, hasRequiredKeys } from './llm-field-mapper.js'
 import { detectCaptcha } from './captcha-detector.js'
 
 /**
@@ -16,7 +17,9 @@ import { detectCaptcha } from './captcha-detector.js'
  *   formBuilder: string,
  *   captchaType: string | null,
  *   captchaSiteKey: string | null,
- *   confidenceScore: number
+ *   confidenceScore: number,
+ *   mappingMethod: 'heuristic' | 'llm',
+ *   llmTokensUsed?: number
  * } | {
  *   status: 'failed',
  *   failureReason: 'no_contact_page' | 'fetch_failed' | 'no_form_found' | 'low_mapping_confidence' | 'iframe_only_builder',
@@ -73,14 +76,50 @@ export async function discoverDomain(domain, options = {}) {
     return { status: 'failed', failureReason: 'no_form_found', contactUrl }
   }
 
-  // 4. Map fields
-  const { mapping, confidence } = mapFields(form.fields)
-  if (confidence < 1) {
-    // 1.0 = email + message + name all mapped. Anything less is suspect for
-    // the heuristic mapper and should fall through to LLM in step 8.
+  // 4. Heuristic mapping first — free, fast, succeeds on plain HTML forms.
+  const heuristic = mapFields(form.fields)
+  let mapping = { ...heuristic.mapping }
+  let confidence = heuristic.confidence
+  /** @type {'heuristic' | 'llm'} */
+  let mappingMethod = 'heuristic'
+  let llmTokensUsed = 0
+
+  // If the heuristic missed any of the three required keys (email, message,
+  // a name), ask Claude. This is where wpforms[fields][N] / input_3 / similar
+  // opaque field names get resolved.
+  if (!hasRequiredKeys(heuristic.mapping) && process.env.ANTHROPIC_API_KEY) {
+    try {
+      const llm = await mapFieldsViaLLM({ formHtml: form.formHtml, logger })
+      llmTokensUsed = llm.tokensUsed
+      if (hasRequiredKeys(llm.mapping)) {
+        // LLM produced a usable mapping — switch to it. Carry the LLM's
+        // self-reported confidence so the cache row reflects which method
+        // produced the result.
+        mapping = { ...llm.mapping }
+        confidence = llm.confidence
+        mappingMethod = 'llm'
+        logger.info(
+          { domain, contactUrl, mappedKeys: Object.keys(llm.mapping).length, llmTokensUsed },
+          '[discovery] LLM mapping accepted',
+        )
+      } else {
+        logger.info(
+          { domain, contactUrl, llmMapping: llm.mapping, llmTokensUsed },
+          '[discovery] LLM mapping still missing required keys',
+        )
+      }
+    } catch (err) {
+      logger.warn(
+        { domain, contactUrl, err: err instanceof Error ? err.message : String(err) },
+        '[discovery] LLM mapper failed; falling back to heuristic result',
+      )
+    }
+  }
+
+  if (!hasRequiredKeys(mapping)) {
     logger.info(
-      { domain, contactUrl, confidence, mapping },
-      '[discovery] heuristic mapping below threshold',
+      { domain, contactUrl, confidence, mapping, mappingMethod, llmTokensUsed },
+      '[discovery] mapping missing required keys after both methods',
     )
     return {
       status: 'failed',
@@ -96,7 +135,9 @@ export async function discoverDomain(domain, options = {}) {
   const captcha = detectCaptcha(html)
 
   // Inject submit_button into the mapping for the submission worker — Playwright
-  // clicks this selector to fire the form.
+  // clicks this selector to fire the form. Heuristic and LLM both leave this
+  // out by default; the extractor's fallback selector is more reliable than
+  // either since it's anchored on type=submit.
   mapping.submit_button = form.submitSelector
 
   return {
@@ -108,6 +149,8 @@ export async function discoverDomain(domain, options = {}) {
     formBuilder: form.formBuilder,
     captchaType: captcha?.type ?? null,
     captchaSiteKey: captcha?.siteKey ?? null,
+    mappingMethod,
+    llmTokensUsed,
     confidenceScore: confidence,
   }
 }

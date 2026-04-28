@@ -14,7 +14,7 @@ What works today:
 - `GET /health` → `{ status: "ok" }`, no auth.
 - `POST /batches/:id/run` → bearer-auth, claims items, runs Playwright form-fill,
   writes results.
-- Discovery CLI: `npm run dev:discover <domain>` (heuristic mapper).
+- Discovery CLI: `npm run dev:discover <domain>` (heuristic mapper, with Claude Sonnet 4.6 fallback for opaque field names).
 - Submission CLI: `npm run dev:submit <item_id>` for single-item iteration.
 - Residential proxy via Decodo (sticky session per submission, response bytes
   tracked into `proxy_bytes_used`). Proxy is **optional** — without
@@ -62,6 +62,8 @@ identity stays in admin-core-labs, not here).
 | `LOG_LEVEL` | Pino level (`info`, `debug`, etc.) |
 | `DECODO_USERNAME` / `DECODO_PASSWORD` | Optional; without these, no proxy |
 | `DECODO_HOST` / `DECODO_PORT` | Default `gate.decodo.com:10001` |
+| `ANTHROPIC_API_KEY` | Optional; without it the LLM mapper is skipped (heuristic only) |
+| `ANTHROPIC_MODEL` | Default `claude-sonnet-4-6` |
 
 | Var | Purpose |
 |---|---|

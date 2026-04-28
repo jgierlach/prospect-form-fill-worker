@@ -10,6 +10,7 @@
     "dev:submit": "node scripts/dev-submit.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
     "@supabase/supabase-js": "^2.45.0",
     "cheerio": "^1.0.0",
     "dotenv": "^16.4.5",
