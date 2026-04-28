@@ -142,12 +142,14 @@ export function mapFields(fields) {
     if (!usedSelectors.has(field.selector)) unmapped.push(field)
   }
 
-  // Confidence: a contact form needs at minimum email + message + some name.
+  // Confidence: a contact form needs at minimum email + message. Name is a
+  // nice-to-have — some legitimate contact forms (wpforms-defaults, Ghost,
+  // support tickets) skip it entirely. The runner's hasRequiredKeys check
+  // matches this: email + message is the floor for an acceptable mapping.
   const hasEmail = !!mapping.email
   const hasMessage = !!mapping.message
-  const hasName = !!mapping.full_name || !!mapping.first_name
-  const required = [hasEmail, hasMessage, hasName].filter(Boolean).length
-  const confidence = required / 3
+  const required = [hasEmail, hasMessage].filter(Boolean).length
+  const confidence = required / 2
 
   return { mapping, confidence, unmapped }
 }

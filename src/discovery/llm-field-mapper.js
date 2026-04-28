@@ -138,9 +138,13 @@ export async function mapFieldsViaLLM({
 }
 
 /**
- * Does a mapping cover the three keys a contact-form submission requires
- * (email + message + some name)? Used by the runner to decide whether the
- * heuristic was good enough or we need the LLM to take a swing.
+ * Does a mapping cover the keys needed to file a meaningful contact-form
+ * submission? Email is where the reply lands; message is the actual outreach
+ * payload. Name is *not* required — plenty of legitimate contact forms
+ * (wpforms.com, Ghost-style minimal forms, support tickets) skip it.
+ *
+ * Used by the runner to decide whether the heuristic was good enough or we
+ * need the LLM to take a swing.
  *
  * @param {Record<string, string>} mapping
  */
@@ -148,6 +152,5 @@ export function hasRequiredKeys(mapping) {
   if (!mapping) return false
   if (!mapping.email) return false
   if (!mapping.message) return false
-  if (!mapping.full_name && !mapping.first_name) return false
   return true
 }
