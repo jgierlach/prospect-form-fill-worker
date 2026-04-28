@@ -66,6 +66,7 @@ function decideRetry(failureReason, attempts, maxAttempts) {
  *   successIndicator: string,
  *   screenshotPath?: string | null,
  *   proxyBytesUsed?: number | null,
+ *   captchaSolveCostCents?: number | null,
  *   isDryRun: boolean,
  *   logger?: { info: Function, warn: Function }
  * }} args
@@ -77,6 +78,7 @@ export async function completeSuccess({
   successIndicator,
   screenshotPath = null,
   proxyBytesUsed = null,
+  captchaSolveCostCents = null,
   isDryRun,
   logger = console,
 }) {
@@ -90,6 +92,7 @@ export async function completeSuccess({
       failure_reason: null,
       screenshot_url: screenshotPath,
       proxy_bytes_used: proxyBytesUsed,
+      captcha_solve_cost_cents: captchaSolveCostCents,
       worker_id: null,
       next_attempt_at: null,
       updated_at: now,
@@ -130,6 +133,7 @@ export async function completeSuccess({
  *   maxAttempts: number,
  *   screenshotPath?: string | null,
  *   proxyBytesUsed?: number | null,
+ *   captchaSolveCostCents?: number | null,
  *   logger?: { info: Function, warn: Function }
  * }} args
  */
@@ -142,6 +146,7 @@ export async function completeFailure({
   maxAttempts,
   screenshotPath = null,
   proxyBytesUsed = null,
+  captchaSolveCostCents = null,
   logger = console,
 }) {
   const { status, nextAttemptAt } = decideRetry(failureReason, attempts, maxAttempts)
@@ -153,6 +158,7 @@ export async function completeFailure({
       failure_reason: failureReason,
       screenshot_url: screenshotPath,
       proxy_bytes_used: proxyBytesUsed,
+      captcha_solve_cost_cents: captchaSolveCostCents,
       next_attempt_at: nextAttemptAt,
       // worker_id only cleared when we're done (terminal failed) or about to retry
       worker_id: null,

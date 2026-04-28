@@ -64,6 +64,7 @@ identity stays in admin-core-labs, not here).
 | `DECODO_HOST` / `DECODO_PORT` | Default `gate.decodo.com:10001` |
 | `ANTHROPIC_API_KEY` | Optional; without it the LLM mapper is skipped (heuristic only) |
 | `ANTHROPIC_MODEL` | Default `claude-sonnet-4-6` |
+| `TWOCAPTCHA_API_KEY` | Optional; without it captcha-protected forms are skipped |
 
 | Var | Purpose |
 |---|---|

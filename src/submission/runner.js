@@ -2,6 +2,7 @@ import os from 'node:os'
 import { launchSession, closeSession } from './browser.js'
 import { fillForm } from './filler.js'
 import { submitForm } from './submitter.js'
+import { solveCaptcha, injectCaptchaToken } from './captcha-solver.js'
 import { captureAndUpload } from '../lib/screenshots.js'
 import { claimItems } from '../queue/claim.js'
 import {
@@ -77,11 +78,13 @@ async function processItem({ item, batch, supabase, logger }) {
     return
   }
 
-  // Step 5 deliberately skips captcha-protected forms (no 2Captcha until step 9).
-  if (cache.captcha_type) {
+  // Captcha gate. If the cache marks one but we don't have a 2Captcha key
+  // configured, skip cleanly (operator hasn't enabled paid solving). With a
+  // key, we'll solve mid-flow once we know the page actually rendered.
+  if (cache.captcha_type && !process.env.TWOCAPTCHA_API_KEY) {
     logger.info(
       { itemId: item.id, captchaType: cache.captcha_type },
-      '[runner] cache marks captcha; skipping until step 9',
+      '[runner] cache marks captcha but TWOCAPTCHA_API_KEY unset; skipping',
     )
     await completeSkipped({
       supabase,
@@ -164,7 +167,69 @@ async function processItem({ item, batch, supabase, logger }) {
       metadata: { filledKeys, skippedKeys },
     })
 
-    // 6. Pre-submit screenshot (always — useful evidence both paths)
+    // 6. Solve + inject captcha if the cache marks one. Done after fill so the
+    // form is fully populated when we drop the token (some sites validate
+    // both at submit time). Solve is bounded to ~90s; failure is non-retryable
+    // per spec §7.9 — once a site is captcha-hostile, retry just burns spend.
+    let captchaSolveCostCents = 0
+    if (cache.captcha_type && cache.captcha_site_key) {
+      const captchaStart = Date.now()
+      try {
+        const solveResult = await solveCaptcha({
+          type: cache.captcha_type,
+          siteKey: cache.captcha_site_key,
+          pageUrl: cache.contact_url,
+          logger,
+        })
+        if (solveResult) {
+          captchaSolveCostCents = solveResult.costCents
+          await injectCaptchaToken({
+            page: session.page,
+            type: cache.captcha_type,
+            token: solveResult.token,
+            logger,
+          })
+          await logStep({
+            supabase,
+            itemId: item.id,
+            step: 'captcha_solved',
+            status: 'ok',
+            durationMs: Date.now() - captchaStart,
+            metadata: {
+              type: cache.captcha_type,
+              solveMs: solveResult.elapsedMs,
+              costCents: solveResult.costCents,
+            },
+          })
+        }
+      } catch (err) {
+        logger.warn(
+          { itemId: item.id, err: err instanceof Error ? err.message : String(err) },
+          '[runner] captcha solve failed',
+        )
+        await logStep({
+          supabase,
+          itemId: item.id,
+          step: 'captcha_failed',
+          status: 'error',
+          durationMs: Date.now() - captchaStart,
+          metadata: { error: err instanceof Error ? err.message : String(err) },
+        })
+        await completeFailure({
+          supabase,
+          itemId: item.id,
+          sourcedWebsiteId: item.sourced_website_id,
+          failureReason: 'captcha_failed',
+          attempts: item.attempts,
+          maxAttempts: item.max_attempts,
+          proxyBytesUsed: session.getBytesUsed(),
+          logger,
+        })
+        return
+      }
+    }
+
+    // 7. Pre-submit screenshot (always — useful evidence both paths)
     const preSubmitPath = await captureAndUpload({
       page: session.page,
       supabase,
@@ -173,7 +238,7 @@ async function processItem({ item, batch, supabase, logger }) {
       logger,
     })
 
-    // 7. Branch on dry-run
+    // 8. Branch on dry-run
     if (batch.dry_run) {
       await completeSuccess({
         supabase,
@@ -182,6 +247,7 @@ async function processItem({ item, batch, supabase, logger }) {
         successIndicator: 'dry_run',
         screenshotPath: preSubmitPath ?? beforePath ?? null,
         proxyBytesUsed: session.getBytesUsed(),
+        captchaSolveCostCents,
         isDryRun: true,
         logger,
       })
@@ -192,7 +258,7 @@ async function processItem({ item, batch, supabase, logger }) {
       return
     }
 
-    // 8. Real submit (currently rare in step 5 — no proxy, no captcha, expect Cloudflare to block on most prod sites)
+    // 9. Real submit
     const submitStart = Date.now()
     const beforeUrl = session.page.url()
     const outcome = await submitForm({
@@ -221,7 +287,7 @@ async function processItem({ item, batch, supabase, logger }) {
 
     const proxyBytesUsed = session.getBytesUsed()
 
-    // 10. Complete based on outcome
+    // 11. Complete based on outcome
     if (outcome.status === 'success') {
       await completeSuccess({
         supabase,
@@ -230,6 +296,7 @@ async function processItem({ item, batch, supabase, logger }) {
         successIndicator: outcome.indicator,
         screenshotPath: afterPath ?? preSubmitPath ?? null,
         proxyBytesUsed,
+        captchaSolveCostCents,
         isDryRun: false,
         logger,
       })
@@ -245,12 +312,13 @@ async function processItem({ item, batch, supabase, logger }) {
         maxAttempts: item.max_attempts,
         screenshotPath: afterPath ?? preSubmitPath ?? null,
         proxyBytesUsed,
+        captchaSolveCostCents,
         logger,
       })
     }
 
     logger.info(
-      { itemId: item.id, outcome, elapsedMs: Date.now() - t0, proxyBytes: proxyBytesUsed },
+      { itemId: item.id, outcome, elapsedMs: Date.now() - t0, proxyBytes: proxyBytesUsed, captchaCents: captchaSolveCostCents },
       '[runner] item complete',
     )
   } catch (err) {
