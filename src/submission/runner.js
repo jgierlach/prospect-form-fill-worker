@@ -126,11 +126,38 @@ async function processItem({ item, batch, supabase, logger }) {
 
     // 3. Navigate
     const navStart = Date.now()
+    let navResponse = null
     try {
-      await session.page.goto(cache.contact_url, { waitUntil: 'networkidle', timeout: 45000 })
+      navResponse = await session.page.goto(cache.contact_url, { waitUntil: 'networkidle', timeout: 45000 })
     } catch {
       // networkidle can be flaky on chatty sites; fall back to domcontentloaded
-      await session.page.goto(cache.contact_url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      navResponse = await session.page.goto(cache.contact_url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    }
+    // Playwright's goto() does NOT throw on HTTP 4xx/5xx — it returns a
+    // Response with the error status. Without an explicit check we'd "succeed"
+    // navigation to a proxy-407 or site-403 error page and waste time filling
+    // a DOM that doesn't have the form. Treat anything >=400 as a nav failure.
+    const navStatus = navResponse?.status() ?? null
+    if (!navStatus || navStatus >= 400) {
+      await logStep({
+        supabase,
+        itemId: item.id,
+        step: 'navigated',
+        status: 'error',
+        durationMs: Date.now() - navStart,
+        metadata: { url: cache.contact_url, httpStatus: navStatus },
+      })
+      await completeFailure({
+        supabase,
+        itemId: item.id,
+        sourcedWebsiteId: item.sourced_website_id,
+        failureReason: navStatus ? `nav_failed_${navStatus}` : 'nav_failed',
+        attempts: item.attempts,
+        maxAttempts: item.max_attempts,
+        proxyBytesUsed: session.getBytesUsed(),
+        logger,
+      })
+      return
     }
     await logStep({
       supabase,
@@ -138,7 +165,7 @@ async function processItem({ item, batch, supabase, logger }) {
       step: 'navigated',
       status: 'ok',
       durationMs: Date.now() - navStart,
-      metadata: { url: cache.contact_url },
+      metadata: { url: cache.contact_url, httpStatus: navStatus },
     })
 
     // 4. Before screenshot

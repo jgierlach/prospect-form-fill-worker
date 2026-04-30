@@ -46,10 +46,11 @@ function buildProxyConfig(logger) {
   return {
     proxy: {
       server: `http://${host}:${port}`,
-      // Decodo sticky-session syntax: append `-session-XXXX` to the username.
-      // Each submission gets a fresh residential IP that holds for the
-      // life of this browser launch.
-      username: `${username}-session-${sessionId}`,
+      // Decodo sticky-session syntax: `user-{customer}-session-{XXXX}`. The
+      // `user-` prefix is required — without it the gateway rejects with 407
+      // even though credentials are otherwise valid. Each submission gets a
+      // fresh residential IP that holds for the life of this browser launch.
+      username: `user-${username}-session-${sessionId}`,
       password,
     },
     sessionId,

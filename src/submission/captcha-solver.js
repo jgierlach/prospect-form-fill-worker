@@ -65,12 +65,14 @@ async function submitJob({ type, siteKey, pageUrl, apiKey }) {
     pageurl: pageUrl,
     json: '1',
   })
-  // `sitekey` for Turnstile, `googlekey` for everything else (yes, including
-  // hCaptcha — 2Captcha's API is inconsistent here for legacy reasons).
-  if (type === 'turnstile') {
-    params.set('sitekey', siteKey)
-  } else {
+  // 2Captcha API: `googlekey` only for reCAPTCHA (legacy); `sitekey` for
+  // hCaptcha and Turnstile. The hCaptcha endpoint stopped accepting
+  // `googlekey` and now responds with ERROR_SITEKEY / "sitekey parameter is
+  // missing in your request."
+  if (type === 'recaptcha_v2' || type === 'recaptcha_v3') {
     params.set('googlekey', siteKey)
+  } else {
+    params.set('sitekey', siteKey)
   }
   if (type === 'recaptcha_v3') {
     params.set('version', 'v3')
