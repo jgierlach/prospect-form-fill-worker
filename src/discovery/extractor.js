@@ -195,6 +195,42 @@ function findLabel($, fieldEl) {
 }
 
 /**
+ * Detect honeypot inputs — fields styled to be invisible to humans but visible
+ * to bots. Filling them flags the submission as automated; server-side handlers
+ * typically reject (or silently drop) the form. Common fingerprints:
+ *   - aria-hidden="true"   — no real form field should be hidden from screen readers
+ *   - tabindex="-1"        — real fields belong in tab order
+ *   - off-screen positioning (e.g. left:-10000px) via inline style
+ *   - 1px × 1px inline-styled box
+ *
+ * Any one signal is enough — these are intentional bot-trap markers and don't
+ * appear on legitimate contact-form fields.
+ *
+ * @param {cheerio.CheerioAPI} $
+ * @param {cheerio.Element} fieldEl
+ * @returns {boolean}
+ */
+function isHoneypot($, fieldEl) {
+  const $el = $(fieldEl)
+  if ($el.attr('aria-hidden') === 'true') return true
+  if ($el.attr('tabindex') === '-1') return true
+  const style = ($el.attr('style') || '').toLowerCase().replace(/\s+/g, '')
+  if (!style) return false
+  // Off-screen via large negative offset (≥3 digits of pixels) on an absolutely
+  // or fixed-positioned element. The 3-digit threshold avoids false positives
+  // on legitimate negative margins (e.g. -2px borders).
+  if (/position:(absolute|fixed)/.test(style) && /(left|top|right|bottom):-\d{3,}/.test(style)) {
+    return true
+  }
+  // 1px × 1px collapsed boxes — real fields render at meaningful sizes.
+  if (/width:1px/.test(style) && /height:1px/.test(style)) return true
+  // display:none or visibility:hidden inline — covers the simpler-but-rarer pattern.
+  if (/display:none/.test(style)) return true
+  if (/visibility:hidden/.test(style)) return true
+  return false
+}
+
+/**
  * Walk the form's input/textarea/select elements and produce metadata the
  * field-mapper consumes.
  *
@@ -214,6 +250,7 @@ function extractFields($, formEl, formScope) {
     const type = (($el.attr('type') || '').toLowerCase()) || (tag === 'textarea' ? 'textarea' : tag === 'select' ? 'select' : 'text')
 
     if (tag === 'input' && SKIP_INPUT_TYPES.has(type)) return
+    if (isHoneypot($, el)) return
 
     fields.push({
       selector: buildFieldSelector($, el, formScope),
