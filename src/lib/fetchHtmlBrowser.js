@@ -1,7 +1,7 @@
 import { chromium } from 'playwright'
 import { pickUserAgent, pickViewport } from './userAgents.js'
 
-const DEFAULT_TIMEOUT_MS = 30000
+const DEFAULT_TIMEOUT_MS = 45000
 const FORM_WAIT_MS = 5000
 
 /**

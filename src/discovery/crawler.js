@@ -10,10 +10,23 @@ import { detectSpaBuilder } from '../lib/spaDetector.js'
  * we fall back to crawling here, we want the same definition of "contact-y").
  */
 const CONTACT_PATH_PATTERNS = [
+  // Pure contact pages — the canonical hits.
   { pattern: /^\/contact\/?$/i, score: 100 },
   { pattern: /\/contact[-_]?us\/?$/i, score: 95 },
   { pattern: /\/contact\/?/i, score: 80 },
   { pattern: /\/get[-_]?in[-_]?touch\/?/i, score: 80 },
+  // Quote / estimate / RFQ pages — for many B2B and trades sites the only
+  // public form lives here, not on a /contact page. Score below /contact so
+  // when both exist the cleaner contact form wins, but high enough to beat
+  // generic /about pages.
+  { pattern: /\/request[-_]?(?:a[-_]?)?quote\/?/i, score: 78 },
+  { pattern: /\/get[-_]?(?:a[-_]?)?quote\/?/i, score: 76 },
+  { pattern: /\/(?:free[-_]?)?quote\/?$/i, score: 72 },
+  { pattern: /\/rfq\/?$/i, score: 76 },
+  { pattern: /\/(?:request[-_]?an?[-_]?|free[-_]?)?estimate\/?/i, score: 72 },
+  { pattern: /\/book[-_]?(?:online|a[-_]?(?:service|appointment|consultation))\/?/i, score: 68 },
+  { pattern: /\/schedule[-_]?(?:a[-_]?)?(?:consultation|appointment|call)\/?/i, score: 65 },
+  // Weaker contact-y signals.
   { pattern: /\/reach[-_]?out\/?/i, score: 70 },
   { pattern: /\/about[-_]?contact\/?/i, score: 70 },
   { pattern: /\/connect\/?$/i, score: 60 },
@@ -21,7 +34,8 @@ const CONTACT_PATH_PATTERNS = [
   { pattern: /\/about\/?$/i, score: 45 },
 ]
 
-const CONTACT_LINK_TEXT = /\b(contact|get in touch|reach out|connect with us)\b/i
+const CONTACT_LINK_TEXT =
+  /\b(contact|get in touch|reach out|connect with us|request (?:a |an )?(?:quote|estimate)|get (?:a |an )?(?:quote|estimate)|free (?:quote|estimate)|rfq|book (?:online|a service|an appointment|a consultation)|schedule (?:a |your )?(?:consultation|appointment|call))\b/i
 
 /**
  * @typedef {{
@@ -196,6 +210,20 @@ export async function resolveContactUrl(domain, options = {}) {
     '/contact-us',
     '/get-in-touch/',
     '/about/contact/',
+    // Quote / estimate / RFQ direct probes — recovers trades / B2B sites that
+    // never link to a contact page from the homepage.
+    '/quote/',
+    '/quote',
+    '/request-a-quote/',
+    '/request-a-quote',
+    '/get-a-quote/',
+    '/free-quote/',
+    '/estimate/',
+    '/estimate',
+    '/free-estimate/',
+    '/free-estimate',
+    '/rfq/',
+    '/rfq',
   ]
   for (const path of probedPaths) {
     const url = new URL(path, baseUrl).toString()
