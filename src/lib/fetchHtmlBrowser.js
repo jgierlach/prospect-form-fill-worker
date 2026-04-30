@@ -42,7 +42,11 @@ export async function fetchHtmlBrowser(url, options = {}) {
     })
 
     const page = await context.newPage()
-    await page.goto(url, { waitUntil: 'networkidle', timeout: timeoutMs })
+    // domcontentloaded — not networkidle — for the goto wait. Modern marketing
+    // sites keep firing analytics / chat-widget / polling requests for ages,
+    // so networkidle routinely times out at 30s even when the form is fully
+    // rendered. The form-selector wait below is the meaningful blocking signal.
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
 
     // Some builders (Wix especially) finish their primary network burst before
     // the form widget hydrates. Give the form a few extra seconds to appear,
