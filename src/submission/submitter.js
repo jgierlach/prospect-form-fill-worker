@@ -31,15 +31,17 @@ export async function submitForm({ page, submitSelector, beforeUrl, logger = con
     await page.locator(submitSelector).first().click({ delay: 50 })
   }
 
-  // Wait for *something* to change. Race three signals.
+  // Wait for *something* to change. Race three positive signals.
+  //
+  // networkidle is deliberately NOT in the race: AJAX-submit forms (Gravity,
+  // WPForms, Wix, HubSpot, …) leave the page already at networkidle when the
+  // click fires, so waitForLoadState resolves in milliseconds — before the POST
+  // has even gone out — and we classify a stale DOM as ambiguous_no_signal.
   let waitReason = 'timeout'
   try {
     await Promise.race([
       page.waitForURL((u) => u.toString() !== beforeUrl, { timeout: POST_SUBMIT_TIMEOUT_MS }).then(() => {
         waitReason = 'url_change'
-      }),
-      page.waitForLoadState('networkidle', { timeout: POST_SUBMIT_TIMEOUT_MS }).then(() => {
-        waitReason = 'network_idle'
       }),
       page
         .waitForFunction(
@@ -49,11 +51,23 @@ export async function submitForm({ page, submitSelector, beforeUrl, logger = con
         .then(() => {
           waitReason = 'success_text'
         }),
+      // Form replaced/removed by JS — typical AJAX confirmation pattern.
+      page
+        .waitForFunction(
+          () => document.querySelectorAll('form').length === 0,
+          { timeout: POST_SUBMIT_TIMEOUT_MS },
+        )
+        .then(() => {
+          waitReason = 'form_removed'
+        }),
     ])
   } catch {
     // All three timed out — proceed to classify whatever we have.
     logger.warn({ beforeUrl, timeoutMs: POST_SUBMIT_TIMEOUT_MS }, '[submitter] post-submit wait timed out')
   }
+  // Belt-and-suspenders: brief settle time so AJAX confirmations rendering
+  // just after our signal have time to land in the DOM before we read text.
+  await page.waitForTimeout(2000)
   logger.debug({ waitReason }, '[submitter] post-submit settled')
 
   const afterUrl = page.url()
