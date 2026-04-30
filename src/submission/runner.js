@@ -14,7 +14,11 @@ import {
 import { logStep } from '../queue/log.js'
 
 const SUBMISSION_CONCURRENCY = parseInt(process.env.SUBMISSION_CONCURRENCY || '3', 10)
-const SUBMISSION_TIMEOUT_MS = parseInt(process.env.SUBMISSION_TIMEOUT_MS || '120000', 10)
+// Per-item budget. Has to comfortably fit: nav (~15s) + human-paced fill
+// (~30–60s for a typical message) + hCaptcha solve (up to ~180s) + submit
+// click + screenshots (~15s). 240s gives headroom; tune via env on busier
+// captcha days.
+const SUBMISSION_TIMEOUT_MS = parseInt(process.env.SUBMISSION_TIMEOUT_MS || '240000', 10)
 const WORKER_ID_PREFIX = process.env.WORKER_ID_PREFIX || 'hetzner-prospect-fill'
 const WORKER_ID = `${WORKER_ID_PREFIX}-${os.hostname()}-${process.pid}`
 

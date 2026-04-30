@@ -1,6 +1,9 @@
 const TWOCAPTCHA_BASE = 'https://2captcha.com'
 const POLL_INTERVAL_MS = 5000
-const MAX_POLL_MS = 90_000
+// hCaptcha solves on 2Captcha typically finish in 30–90s but routinely take
+// longer under load. Cap at 3 minutes so a slow solve doesn't fail the
+// submission entirely; the outer SUBMISSION_TIMEOUT_MS is the ultimate bound.
+const MAX_POLL_MS = 180_000
 
 /**
  * @typedef {'recaptcha_v2' | 'recaptcha_v3' | 'hcaptcha' | 'turnstile'} CaptchaType
