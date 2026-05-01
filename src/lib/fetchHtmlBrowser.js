@@ -119,10 +119,14 @@ async function fetchOnce({ url, timeoutMs, userAgent, viewport, proxy, logger })
  * residential proxy. DNS-not-resolved and bad-URL errors skip the retry,
  * since residential routing won't fix a dead domain.
  *
+ * Pass a `fetchState` (see fetchHtml.js) to share the proxy verdict across
+ * fetches in one discovery run.
+ *
  * @param {string} url
  * @param {{
  *   timeoutMs?: number,
- *   logger?: { debug?: Function, info?: Function, warn?: Function }
+ *   logger?: { debug?: Function, info?: Function, warn?: Function },
+ *   fetchState?: import('./fetchHtml.js').FetchState
  * }} [options]
  * @returns {Promise<string | null>}
  */
@@ -131,35 +135,40 @@ export async function fetchHtmlBrowser(url, options = {}) {
   const logger = options.logger ?? console
   const userAgent = pickUserAgent()
   const viewport = pickViewport()
+  const fetchState = options.fetchState
 
-  // 1. Direct attempt.
-  const direct = await fetchOnce({ url, timeoutMs, userAgent, viewport, logger })
-  if (direct.html) return direct.html
-  if (!shouldRetryViaProxy(direct.error)) {
-    logger.warn?.(
-      { url, err: direct.error instanceof Error ? direct.error.message : String(direct.error) },
-      '[fetchHtmlBrowser] error',
+  // 1. Direct attempt — skip when caller knows this host firewalls us.
+  if (!fetchState?.forceProxy) {
+    const direct = await fetchOnce({ url, timeoutMs, userAgent, viewport, logger })
+    if (direct.html) return direct.html
+    if (!shouldRetryViaProxy(direct.error)) {
+      logger.warn?.(
+        { url, err: direct.error instanceof Error ? direct.error.message : String(direct.error) },
+        '[fetchHtmlBrowser] error',
+      )
+      return null
+    }
+    logger.info?.(
+      { url, err: direct.error instanceof Error ? direct.error.message : null },
+      '[fetchHtmlBrowser] direct blocked — retrying via Decodo',
     )
-    return null
   }
 
-  // 2. Connection-level fail → retry through Decodo. Many managed-WP hosts
-  //    (WP Engine, Kinsta, Cloudways, etc.) firewall Hetzner / DigitalOcean /
-  //    AWS ranges. Residential routing bypasses the block.
+  // 2. Proxy attempt — managed-WP hosts (WP Engine, Kinsta, Cloudways) and
+  //    others firewall datacenter ranges. Residential routing bypasses.
   const proxy = buildDecodoProxy()
   if (!proxy) {
-    logger.warn?.(
-      { url, err: direct.error instanceof Error ? direct.error.message : String(direct.error) },
-      '[fetchHtmlBrowser] connection error and Decodo not configured — giving up',
-    )
+    logger.warn?.({ url }, '[fetchHtmlBrowser] Decodo not configured — giving up')
     return null
   }
-  logger.info?.(
-    { url, err: direct.error instanceof Error ? direct.error.message : null },
-    '[fetchHtmlBrowser] direct blocked — retrying via Decodo',
-  )
   const proxied = await fetchOnce({ url, timeoutMs, userAgent, viewport, proxy, logger })
-  if (proxied.html) return proxied.html
+  if (proxied.html) {
+    if (fetchState) {
+      fetchState.usedProxy = true
+      fetchState.forceProxy = true
+    }
+    return proxied.html
+  }
   if (proxied.error) {
     logger.warn?.(
       { url, err: proxied.error instanceof Error ? proxied.error.message : String(proxied.error) },

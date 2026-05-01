@@ -105,6 +105,20 @@ async function fetchOnce(url, { timeoutMs, userAgent, dispatcher, logger }) {
 }
 
 /**
+ * @typedef {{ forceProxy: boolean, usedProxy: boolean }} FetchState
+ *
+ * Mutable state object passed through a discovery run. Lets the caller skip
+ * the doomed-direct-attempt on hosts already known to firewall our IP, and
+ * record the verdict back to the DB at the end of the run.
+ *   - `forceProxy`: when true, skip direct fetch and go straight to Decodo.
+ *     Set at run start from sourced_websites.needs_proxy; flipped to true
+ *     after the first successful proxy retry so subsequent fetches in the
+ *     same discovery don't re-eat a 10s direct timeout each.
+ *   - `usedProxy`: latches true the first time we ever served a response via
+ *     proxy in this run. Caller persists this back to needs_proxy.
+ */
+
+/**
  * Fetch a URL with a short timeout, HTML-only. Returns null on any failure.
  * Discovery is best-effort — never throws for recoverable network errors.
  *
@@ -114,11 +128,15 @@ async function fetchOnce(url, { timeoutMs, userAgent, dispatcher, logger }) {
  * Decodo's residential proxy. Application-level errors (4xx, 5xx, non-html
  * content) skip the retry to avoid burning proxy cost on dead pages.
  *
+ * Pass a `fetchState` to share the proxy verdict across multiple fetches in
+ * one discovery run (saves ~10s per fetch on known-blocked hosts).
+ *
  * @param {string} url
  * @param {{
  *   timeoutMs?: number,
  *   userAgent?: string,
- *   logger?: { debug: (...args: unknown[]) => void, info?: (...args: unknown[]) => void }
+ *   logger?: { debug: (...args: unknown[]) => void, info?: (...args: unknown[]) => void },
+ *   fetchState?: FetchState
  * }} [options]
  * @returns {Promise<string | null>}
  */
@@ -126,34 +144,35 @@ export async function fetchHtml(url, options = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const userAgent = options.userAgent ?? DEFAULT_USER_AGENT
   const logger = options.logger ?? console
+  const fetchState = options.fetchState
 
-  // 1. Direct attempt — free when it works.
-  const direct = await fetchOnce(url, { timeoutMs, userAgent, logger })
-  if (direct.html) return direct.html
-  if (!shouldRetryViaProxy(direct.error)) {
-    if (direct.error) {
-      logger.debug(
-        { url, err: direct.error instanceof Error ? direct.error.message : String(direct.error) },
-        '[fetchHtml] error',
-      )
+  // 1. Direct attempt — free when it works. Skip when we already know this
+  //    host firewalls our IP (saves ~10s per fetch on those hosts).
+  if (!fetchState?.forceProxy) {
+    const direct = await fetchOnce(url, { timeoutMs, userAgent, logger })
+    if (direct.html) return direct.html
+    if (!shouldRetryViaProxy(direct.error)) {
+      if (direct.error) {
+        logger.debug(
+          { url, err: direct.error instanceof Error ? direct.error.message : String(direct.error) },
+          '[fetchHtml] error',
+        )
+      }
+      return null
     }
-    return null
+    logger.info?.(
+      { url, err: direct.error instanceof Error ? direct.error.message : null },
+      '[fetchHtml] direct blocked — retrying via Decodo',
+    )
   }
 
-  // 2. Connection-level fail → host likely blocks our datacenter IP. Retry
-  //    through Decodo (residential routing usually bypasses the block).
+  // 2. Proxy attempt. Either we just hit a connection-level fail, or the
+  //    caller pre-flagged this host as needing proxy.
   const dispatcher = buildDecodoDispatcher()
   if (!dispatcher) {
-    logger.debug(
-      { url },
-      '[fetchHtml] connection error and Decodo not configured — giving up',
-    )
+    logger.debug({ url }, '[fetchHtml] Decodo not configured — giving up')
     return null
   }
-  logger.info?.(
-    { url, err: direct.error instanceof Error ? direct.error.message : null },
-    '[fetchHtml] direct blocked — retrying via Decodo',
-  )
   const proxied = await fetchOnce(url, {
     timeoutMs: PROXY_TIMEOUT_MS,
     userAgent,
@@ -166,7 +185,13 @@ export async function fetchHtml(url, options = {}) {
   } catch {
     /* swallow */
   }
-  if (proxied.html) return proxied.html
+  if (proxied.html) {
+    if (fetchState) {
+      fetchState.usedProxy = true
+      fetchState.forceProxy = true
+    }
+    return proxied.html
+  }
   if (proxied.error) {
     logger.debug(
       { url, err: proxied.error instanceof Error ? proxied.error.message : String(proxied.error) },

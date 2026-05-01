@@ -42,7 +42,8 @@ const CONTACT_LINK_TEXT =
  *   sourcedWebsiteId?: string | null,
  *   supabase?: import('@supabase/supabase-js').SupabaseClient | null,
  *   logger?: { info: (...args: unknown[]) => void, debug: (...args: unknown[]) => void, warn: (...args: unknown[]) => void },
- *   forceBrowser?: boolean
+ *   forceBrowser?: boolean,
+ *   fetchState?: import('../lib/fetchHtml.js').FetchState
  * }} ResolveOptions
  */
 
@@ -57,17 +58,18 @@ const CONTACT_LINK_TEXT =
  */
 async function fetchHtmlSmart(url, options) {
   const logger = options.logger ?? console
+  const fetchState = options.fetchState
   if (options.forceBrowser) {
     logger.debug?.({ url }, '[crawler] forceBrowser=true — fetching via Playwright')
-    return await fetchHtmlBrowser(url, { logger })
+    return await fetchHtmlBrowser(url, { logger, fetchState })
   }
-  const html = await fetchHtml(url, { logger })
+  const html = await fetchHtml(url, { logger, fetchState })
   if (!html) return null
   if (looksLikeFormPage(html)) return html
   const builder = detectSpaBuilder(html)
   if (!builder) return html
   logger.info?.({ url, builder }, '[crawler] SPA builder detected without static form — escalating to Playwright')
-  const rendered = await fetchHtmlBrowser(url, { logger })
+  const rendered = await fetchHtmlBrowser(url, { logger, fetchState })
   return rendered ?? html
 }
 
