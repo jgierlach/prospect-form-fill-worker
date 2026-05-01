@@ -380,7 +380,10 @@ function findSubmitSelector($, formEl, formScope) {
   if ($submit.length) {
     const id = $submit.attr('id')
     if (id) {
-      const bare = `#${cssEscapeIdent(id)}`
+      // buildIdSelector falls back to `[id="..."]` for non-CSS-safe ids
+      // (numeric / leading-digit Duda-style ids that crash Playwright's
+      // `#1995151138` parser).
+      const bare = buildIdSelector(id)
       if ($(bare).length === 1) return bare
     }
     return `${formScope} ${$submit[0].tagName.toLowerCase()}[type="submit"]`

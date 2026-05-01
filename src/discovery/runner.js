@@ -127,7 +127,17 @@ export async function discoverDomain(domain, options = {}) {
   if (!form) {
     // Distinguish between "no form" and "iframe-only builder we can't read".
     // detectFormBuilder is run again here cheaply (re-parse) only if useful.
-    const isIframeBuilder = /hbspt\.forms|js\.hsforms\.net|typeform\.com/i.test(html)
+    // Iframe-only builders host the form on a third-party origin we can't
+    // statically extract or fill from the parent page. Detection fingerprints:
+    //   - HubSpot:               hbspt.forms / js.hsforms.net
+    //   - Typeform:              typeform.com (any subdomain)
+    //   - Calendly / scheduler:  assets.calendly.com
+    //   - GoHighLevel widget:    link.<host>.com/widget/form, leadconnectorhq
+    //                            (used by handymanmarketingpros and many
+    //                            white-label CRMs to embed lead-capture forms)
+    //   - JotForm embed:         form.jotform.com / jotform.com/form
+    const isIframeBuilder =
+      /hbspt\.forms|js\.hsforms\.net|typeform\.com|assets\.calendly\.com|leadconnectorhq|link\.[\w-]+\.com\/widget\/form|form\.jotform\.com|jotform\.com\/form/i.test(html)
     const detectedBuilder = detectSpaBuilder(html)
     if (isIframeBuilder) {
       logger.info({ domain, contactUrl, usedBrowser }, '[discovery] iframe-only form builder; deferring to LLM mapper')
