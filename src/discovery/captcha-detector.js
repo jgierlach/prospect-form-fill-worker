@@ -36,6 +36,15 @@ export function detectCaptcha(html) {
   if (v2.length) {
     return { type: 'recaptcha_v2', siteKey: v2.attr('data-sitekey') ?? null }
   }
+  // After grecaptcha hydrates it injects an iframe whose src carries the
+  // sitekey as the `k` param: `…/recaptcha/api2/anchor?ar=1&k=KEY&…`.
+  // This catches forms where the widget div has no data-sitekey because the
+  // sitekey only lives in the JS render call.
+  const v2Iframe = $('iframe[src*="recaptcha/api2/anchor"]').first().attr('src') || ''
+  const v2IframeKey = v2Iframe.match(/[?&]k=([\w-]+)/)
+  if (v2IframeKey) {
+    return { type: 'recaptcha_v2', siteKey: v2IframeKey[1] }
+  }
 
   // ── reCAPTCHA v3 ─────────────────────────────────────────────────────────
   // 3 places the sitekey can live, in priority order:
@@ -90,6 +99,14 @@ export function detectCaptcha(html) {
   )
   if (hCapInlineRender) {
     return { type: 'hcaptcha', siteKey: hCapInlineRender[1] ?? null }
+  }
+  // hCaptcha's hydrated widget injects an iframe inside `.h-captcha` whose
+  // src has the sitekey as a fragment param. Modern hCaptcha integrations
+  // (no SSR'd data-sitekey, sitekey passed at runtime) end up here.
+  const hCapIframe = $('.h-captcha iframe[src], iframe[src*="hcaptcha.com"]').first().attr('src') || ''
+  const hCapIframeKey = hCapIframe.match(/[?&#][^&]*sitekey=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)
+  if (hCapIframeKey) {
+    return { type: 'hcaptcha', siteKey: hCapIframeKey[1] }
   }
   // Last-ditch: placeholder div present but no sitekey discoverable in the
   // static snapshot. Surface as `siteKey: null` so the caller knows a captcha
