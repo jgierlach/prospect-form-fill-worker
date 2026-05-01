@@ -32,18 +32,15 @@ export function detectCaptcha(html) {
 
   // ── reCAPTCHA v2 ─────────────────────────────────────────────────────────
   // Explicit `.g-recaptcha` widget div with data-sitekey.
+  // Order matters: v2 and v3 share the same hydrated iframe URL pattern
+  // (`/recaptcha/api2/anchor?k=KEY`), so iframe-only detection can't tell
+  // them apart. Always check the v3-specific signals first — `?render=KEY`
+  // in the api.js script src is unambiguous v3, as are inline grecaptcha
+  // calls. Only fall back to the iframe-based v2 detection when no v3
+  // signal is present.
   const v2 = $('.g-recaptcha[data-sitekey], div[data-sitekey][class*="g-recaptcha"]').first()
   if (v2.length) {
     return { type: 'recaptcha_v2', siteKey: v2.attr('data-sitekey') ?? null }
-  }
-  // After grecaptcha hydrates it injects an iframe whose src carries the
-  // sitekey as the `k` param: `…/recaptcha/api2/anchor?ar=1&k=KEY&…`.
-  // This catches forms where the widget div has no data-sitekey because the
-  // sitekey only lives in the JS render call.
-  const v2Iframe = $('iframe[src*="recaptcha/api2/anchor"]').first().attr('src') || ''
-  const v2IframeKey = v2Iframe.match(/[?&]k=([\w-]+)/)
-  if (v2IframeKey) {
-    return { type: 'recaptcha_v2', siteKey: v2IframeKey[1] }
   }
 
   // ── reCAPTCHA v3 ─────────────────────────────────────────────────────────
@@ -63,6 +60,16 @@ export function detectCaptcha(html) {
   const v3 = v3SrcMatch || v3InlineExec || v3InlineRender
   if (v3) {
     return { type: 'recaptcha_v3', siteKey: v3[1] ?? null }
+  }
+
+  // After grecaptcha hydrates it injects an iframe whose src carries the
+  // sitekey as the `k` param: `…/recaptcha/api2/anchor?ar=1&k=KEY&…`.
+  // We only get here if no v3-specific signal fired above, so any iframe
+  // we find is a v2 widget that lacked an SSR'd data-sitekey.
+  const v2Iframe = $('iframe[src*="recaptcha/api2/anchor"]').first().attr('src') || ''
+  const v2IframeKey = v2Iframe.match(/[?&]k=([\w-]+)/)
+  if (v2IframeKey) {
+    return { type: 'recaptcha_v2', siteKey: v2IframeKey[1] }
   }
 
   // ── hCaptcha ─────────────────────────────────────────────────────────────
