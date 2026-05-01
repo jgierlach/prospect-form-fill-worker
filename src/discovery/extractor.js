@@ -74,24 +74,52 @@ function scoreForm($, formEl) {
 
   let score = 0
 
-  // Email is the strongest signal — every contact form has one.
-  if ($form.find('input[type="email"], input[name*="email" i]').length > 0) score += 3
+  // Email is the strongest signal — every contact form has one. Match across
+  // name, id, placeholder, aria-label, and autocomplete because builder-
+  // generated forms (GoDaddy WB, Wix, Squarespace) often skip semantic name
+  // attributes and only expose intent via placeholder or aria-label.
+  if (
+    $form.find(
+      'input[type="email"], input[name*="email" i], input[id*="email" i], input[placeholder*="email" i], input[aria-label*="email" i], input[autocomplete*="email" i]',
+    ).length > 0
+  ) {
+    score += 3
+  }
   // Textarea ~= message field; near-universal for contact forms.
   if ($form.find('textarea').length > 0) score += 3
   // Name field
   if (
     $form.find(
-      'input[name*="name" i], input[id*="name" i], input[placeholder*="name" i], input[autocomplete*="name" i]',
+      'input[name*="name" i], input[id*="name" i], input[placeholder*="name" i], input[aria-label*="name" i], input[autocomplete*="name" i]',
     ).length > 0
   ) {
     score += 2
   }
-  // Phone / company
-  if ($form.find('input[type="tel"], input[name*="phone" i]').length > 0) score += 1
-  if ($form.find('input[name*="company" i], input[name*="organization" i]').length > 0) score += 1
+  // Phone
+  if (
+    $form.find(
+      'input[type="tel"], input[name*="phone" i], input[id*="phone" i], input[placeholder*="phone" i], input[aria-label*="phone" i], input[autocomplete*="tel" i]',
+    ).length > 0
+  ) {
+    score += 1
+  }
+  // Company / organization
+  if (
+    $form.find(
+      'input[name*="company" i], input[name*="organization" i], input[id*="company" i], input[placeholder*="company" i], input[aria-label*="company" i], input[autocomplete*="organization" i]',
+    ).length > 0
+  ) {
+    score += 1
+  }
 
-  // Surrounding language nudges
-  if (/\b(contact|get in touch|reach out|how can we help|send (us )?(a )?message|inquiry)\b/i.test(text)) {
+  // Surrounding language nudges. Trades & B2B sites often head their form
+  // with "request a quote" / "free estimate" instead of "contact" — same
+  // intent, different vocabulary.
+  if (
+    /\b(contact|get in touch|reach out|how can we help|send (us )?(a )?message|inquiry|request (?:a |an )?(?:quote|estimate)|free (?:quote|estimate)|tell us about your project)\b/i.test(
+      text,
+    )
+  ) {
     score += 2
   }
 
@@ -321,14 +349,21 @@ export function extractContactForm(html) {
 
   const forms = $('form').toArray()
   const scored = forms
-    .map((formEl) => ({ formEl, score: scoreForm($, formEl) }))
+    .map((formEl) => ({ formEl, score: scoreForm($, formEl), hasTextarea: $(formEl).find('textarea').length > 0 }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score)
 
-  // Need a clear winner — at minimum email + textarea-or-name (score ~5).
-  if (scored.length === 0 || scored[0].score < 5) return null
+  // Threshold: a textarea is a strong contact-form signal on its own (search
+  // and newsletter forms don't have one). When present, accept score ≥ 3 —
+  // this admits opaque builder-generated forms (GoDaddy WB and similar) that
+  // strip semantic name attributes; the LLM field-mapper takes the swing on
+  // those. Without a textarea, keep the original ≥ 5 bar.
+  if (scored.length === 0) return null
+  const top = scored[0]
+  const minScore = top.hasTextarea ? 3 : 5
+  if (top.score < minScore) return null
 
-  const formEl = scored[0].formEl
+  const formEl = top.formEl
   const $form = $(formEl)
   const formScope = buildFormScope($, formEl)
 
