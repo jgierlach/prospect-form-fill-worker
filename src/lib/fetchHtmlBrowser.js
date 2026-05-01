@@ -1,39 +1,75 @@
+import crypto from 'node:crypto'
 import { chromium } from 'playwright'
 import { pickUserAgent, pickViewport } from './userAgents.js'
 
 const DEFAULT_TIMEOUT_MS = 45000
 const FORM_WAIT_MS = 5000
 
-/**
- * Fetch a URL through a real headless Chromium so JS-rendered forms have a
- * chance to hydrate before we read the DOM. Used by discovery as a fallback
- * when the static-HTML fetch turns up no `<form>` and the page fingerprints
- * as a known SPA builder (Wix/Squarespace/Webflow/etc.).
- *
- * Datacenter IP — no Decodo proxy. Discovery against a prospect's homepage is
- * a single GET; residential IP cost is reserved for the submission flow,
- * where bot-detection and CAPTCHAs actually fire.
- *
- * @param {string} url
- * @param {{
- *   timeoutMs?: number,
- *   logger?: { debug?: Function, info?: Function, warn?: Function }
- * }} [options]
- * @returns {Promise<string | null>}
- */
-export async function fetchHtmlBrowser(url, options = {}) {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  const logger = options.logger ?? console
+// Playwright's goto() error message is opaque text, not a code. These regex
+// fragments cover the network-level failures that warrant a Decodo retry —
+// the host firewalled the datacenter IP, the gateway timed out, etc. We
+// deliberately exclude ERR_NAME_NOT_RESOLVED (dead domain) and HTTP-level
+// errors (which goto returns as a Response, not a throw).
+const BROWSER_RETRY_PATTERNS =
+  /ERR_CONNECTION_REFUSED|ERR_CONNECTION_TIMED_OUT|ERR_CONNECTION_RESET|ERR_TIMED_OUT|net::ERR_FAILED|Timeout \d+ms exceeded/i
 
+const BROWSER_NO_RETRY_PATTERNS = /ERR_NAME_NOT_RESOLVED|ERR_INVALID_URL/i
+
+/**
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function shouldRetryViaProxy(err) {
+  const msg = err instanceof Error ? err.message : String(err ?? '')
+  if (!msg) return false
+  if (BROWSER_NO_RETRY_PATTERNS.test(msg)) return false
+  return BROWSER_RETRY_PATTERNS.test(msg)
+}
+
+/**
+ * Decodo proxy config for chromium.launch — null when Decodo creds aren't
+ * configured (callers skip the retry in that case).
+ */
+function buildDecodoProxy() {
+  const username = process.env.DECODO_USERNAME
+  const password = process.env.DECODO_PASSWORD
+  if (!username || !password) return null
+  const host = process.env.DECODO_HOST || 'gate.decodo.com'
+  const port = process.env.DECODO_PORT || '10001'
+  const sessionId = crypto.randomBytes(8).toString('hex')
+  return {
+    server: `http://${host}:${port}`,
+    username: `user-${username}-session-${sessionId}`,
+    password,
+  }
+}
+
+/**
+ * Single-attempt browser fetch. Launches a fresh Chromium, navigates, waits
+ * briefly for a form to render, returns the page HTML. Returns { error } on
+ * any throw from launch/goto/content.
+ *
+ * @param {{
+ *   url: string,
+ *   timeoutMs: number,
+ *   userAgent: string,
+ *   viewport: { width: number, height: number },
+ *   proxy?: ReturnType<typeof buildDecodoProxy>,
+ *   logger: { debug?: Function, info?: Function, warn?: Function }
+ * }} args
+ * @returns {Promise<{ html: string | null, error: unknown }>}
+ */
+async function fetchOnce({ url, timeoutMs, userAgent, viewport, proxy, logger }) {
   let browser
   try {
     browser = await chromium.launch({
       headless: true,
       args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+      ...(proxy ? { proxy } : {}),
     })
     const context = await browser.newContext({
-      userAgent: pickUserAgent(),
-      viewport: pickViewport(),
+      userAgent,
+      viewport,
       locale: 'en-US',
       timezoneId: 'America/New_York',
     })
@@ -57,13 +93,9 @@ export async function fetchHtmlBrowser(url, options = {}) {
       logger.debug?.({ url }, '[fetchHtmlBrowser] form selector did not appear within wait window')
     }
 
-    return await page.content()
+    return { html: await page.content(), error: null }
   } catch (err) {
-    logger.warn?.(
-      { url, err: err instanceof Error ? err.message : String(err) },
-      '[fetchHtmlBrowser] error',
-    )
-    return null
+    return { html: null, error: err }
   } finally {
     if (browser) {
       try {
@@ -73,4 +105,66 @@ export async function fetchHtmlBrowser(url, options = {}) {
       }
     }
   }
+}
+
+/**
+ * Fetch a URL through a real headless Chromium so JS-rendered forms have a
+ * chance to hydrate before we read the DOM. Used by discovery as a fallback
+ * when the static-HTML fetch turns up no `<form>` and the page fingerprints
+ * as a known SPA builder (Wix/Squarespace/Webflow/etc.).
+ *
+ * Strategy: try direct (datacenter IP) first — fast and free. If the goto
+ * fails with a network-layer signal — common on managed-WP hosts that
+ * firewall datacenter IPs at the host firewall — retry through Decodo's
+ * residential proxy. DNS-not-resolved and bad-URL errors skip the retry,
+ * since residential routing won't fix a dead domain.
+ *
+ * @param {string} url
+ * @param {{
+ *   timeoutMs?: number,
+ *   logger?: { debug?: Function, info?: Function, warn?: Function }
+ * }} [options]
+ * @returns {Promise<string | null>}
+ */
+export async function fetchHtmlBrowser(url, options = {}) {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const logger = options.logger ?? console
+  const userAgent = pickUserAgent()
+  const viewport = pickViewport()
+
+  // 1. Direct attempt.
+  const direct = await fetchOnce({ url, timeoutMs, userAgent, viewport, logger })
+  if (direct.html) return direct.html
+  if (!shouldRetryViaProxy(direct.error)) {
+    logger.warn?.(
+      { url, err: direct.error instanceof Error ? direct.error.message : String(direct.error) },
+      '[fetchHtmlBrowser] error',
+    )
+    return null
+  }
+
+  // 2. Connection-level fail → retry through Decodo. Many managed-WP hosts
+  //    (WP Engine, Kinsta, Cloudways, etc.) firewall Hetzner / DigitalOcean /
+  //    AWS ranges. Residential routing bypasses the block.
+  const proxy = buildDecodoProxy()
+  if (!proxy) {
+    logger.warn?.(
+      { url, err: direct.error instanceof Error ? direct.error.message : String(direct.error) },
+      '[fetchHtmlBrowser] connection error and Decodo not configured — giving up',
+    )
+    return null
+  }
+  logger.info?.(
+    { url, err: direct.error instanceof Error ? direct.error.message : null },
+    '[fetchHtmlBrowser] direct blocked — retrying via Decodo',
+  )
+  const proxied = await fetchOnce({ url, timeoutMs, userAgent, viewport, proxy, logger })
+  if (proxied.html) return proxied.html
+  if (proxied.error) {
+    logger.warn?.(
+      { url, err: proxied.error instanceof Error ? proxied.error.message : String(proxied.error) },
+      '[fetchHtmlBrowser] Decodo retry failed',
+    )
+  }
+  return null
 }
