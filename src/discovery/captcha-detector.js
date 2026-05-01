@@ -69,11 +69,21 @@ export function detectCaptcha(html) {
   if (hCapWithKey.length) {
     return { type: 'hcaptcha', siteKey: hCapWithKey.attr('data-sitekey') ?? null }
   }
-  const hCapSrcMatch = scriptSrcs.match(
-    /js\.hcaptcha\.com\/1\/api\.js[^"'\s]*[?&](?:sitekey|render)=([\w-]+)/i,
+  // hCaptcha's `?render=` URL parameter accepts either a UUID sitekey OR a
+  // render-mode flag like `explicit` / `onload`. We only want sitekeys.
+  // Look for `?sitekey=KEY` first (always a sitekey) and fall back to
+  // `?render=` only when the value looks like a UUID (8-4-4-4-12 hex).
+  const hCapSrcSitekey = scriptSrcs.match(
+    /js\.hcaptcha\.com\/1\/api\.js[^"'\s]*[?&]sitekey=([\w-]+)/i,
   )
-  if (hCapSrcMatch) {
-    return { type: 'hcaptcha', siteKey: hCapSrcMatch[1] ?? null }
+  if (hCapSrcSitekey) {
+    return { type: 'hcaptcha', siteKey: hCapSrcSitekey[1] ?? null }
+  }
+  const hCapSrcRender = scriptSrcs.match(
+    /js\.hcaptcha\.com\/1\/api\.js[^"'\s]*[?&]render=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
+  )
+  if (hCapSrcRender) {
+    return { type: 'hcaptcha', siteKey: hCapSrcRender[1] ?? null }
   }
   const hCapInlineRender = scriptText.match(
     /hcaptcha\.render\s*\([^)]*sitekey\s*[:=]\s*['"]([\w-]+)['"]/,

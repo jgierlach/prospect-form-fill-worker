@@ -93,6 +93,27 @@ async function fetchOnce({ url, timeoutMs, userAgent, viewport, proxy, logger })
       logger.debug?.({ url }, '[fetchHtmlBrowser] form selector did not appear within wait window')
     }
 
+    // Scroll the form (or the bottom of the page if no form) into view so
+    // intersection-observer-driven lazy assets fire — captcha scripts on
+    // GoDaddy WB / many React sites only inject themselves once the form is
+    // visible. Without this, our snapshot misses reCAPTCHA/hCaptcha sitekeys
+    // even though a real visitor would clearly see the captcha.
+    try {
+      await page.evaluate(() => {
+        const form = document.querySelector('form, [role="form"]')
+        if (form && 'scrollIntoView' in form) {
+          /** @type {HTMLElement} */ (form).scrollIntoView({ block: 'center' })
+        } else {
+          window.scrollTo({ top: document.body.scrollHeight })
+        }
+      })
+      // Brief settle so any lazy scripts triggered by the scroll have time to
+      // attach themselves to the DOM. 1.5s covers most common loaders.
+      await page.waitForTimeout(1500)
+    } catch {
+      /* swallow — best-effort */
+    }
+
     return { html: await page.content(), error: null }
   } catch (err) {
     return { html: null, error: err }
