@@ -17,35 +17,93 @@ import * as cheerio from 'cheerio'
 export function detectCaptcha(html) {
   const $ = cheerio.load(html)
 
-  // reCAPTCHA v2 — explicit `.g-recaptcha` div with data-sitekey
+  // Build two haystacks once: the full source of inline scripts (for
+  // grecaptcha.execute / hcaptcha.render style calls) and the concatenated
+  // src URLs of remote scripts (for `api.js?render=KEY` URL params used by
+  // reCAPTCHA v3 and some hCaptcha integrations).
+  const scriptText = $('script')
+    .toArray()
+    .map((el) => $(el).html() || '')
+    .join('\n')
+  const scriptSrcs = $('script[src]')
+    .toArray()
+    .map((el) => $(el).attr('src') || '')
+    .join('\n')
+
+  // ── reCAPTCHA v2 ─────────────────────────────────────────────────────────
+  // Explicit `.g-recaptcha` widget div with data-sitekey.
   const v2 = $('.g-recaptcha[data-sitekey], div[data-sitekey][class*="g-recaptcha"]').first()
   if (v2.length) {
     return { type: 'recaptcha_v2', siteKey: v2.attr('data-sitekey') ?? null }
   }
 
-  // reCAPTCHA v3 — invoked from JS via grecaptcha.execute('SITEKEY', ...).
-  // Also catches grecaptcha.render(..., { sitekey: 'SITEKEY' }) for v2-invisible.
-  const scriptText = $('script')
-    .toArray()
-    .map((el) => $(el).html() || '')
-    .join('\n')
-  const v3 =
-    scriptText.match(/grecaptcha\.execute\s*\(\s*['"]([\w-]+)['"]/) ||
-    scriptText.match(/grecaptcha\.render\s*\([^)]*sitekey\s*[:=]\s*['"]([\w-]+)['"]/)
+  // ── reCAPTCHA v3 ─────────────────────────────────────────────────────────
+  // 3 places the sitekey can live, in priority order:
+  //   1. Script src URL parameter — `<script src=".../api.js?render=KEY">`.
+  //      This is the most reliable signal: GoDaddy WB and many enterprise
+  //      sites SSR exactly this script tag with the sitekey in the URL.
+  //   2. Inline JS calling grecaptcha.execute('KEY', …).
+  //   3. Inline JS calling grecaptcha.render(…, { sitekey: 'KEY' }).
+  const v3SrcMatch = scriptSrcs.match(
+    /(?:google\.com|gstatic\.com|recaptcha\.net)\/recaptcha\/(?:api|enterprise)\.js[^"'\s]*[?&]render=([\w-]+)/i,
+  )
+  const v3InlineExec = scriptText.match(/grecaptcha(?:\.enterprise)?\.execute\s*\(\s*['"]([\w-]+)['"]/)
+  const v3InlineRender = scriptText.match(
+    /grecaptcha(?:\.enterprise)?\.render\s*\([^)]*sitekey\s*[:=]\s*['"]([\w-]+)['"]/,
+  )
+  const v3 = v3SrcMatch || v3InlineExec || v3InlineRender
   if (v3) {
     return { type: 'recaptcha_v3', siteKey: v3[1] ?? null }
   }
 
-  // hCaptcha
-  const hCap = $('.h-captcha[data-sitekey], div[data-sitekey][class*="h-captcha"]').first()
-  if (hCap.length) {
-    return { type: 'hcaptcha', siteKey: hCap.attr('data-sitekey') ?? null }
+  // ── hCaptcha ─────────────────────────────────────────────────────────────
+  // 4 detection paths, in priority order:
+  //   1. Widget div with data-sitekey — the canonical pattern.
+  //   2. Script src URL parameter — `<script src=".../api.js?sitekey=KEY">`
+  //      or `…?render=KEY` (less common than reCAPTCHA's but exists).
+  //   3. Inline JS calling hcaptcha.render(…, { sitekey: 'KEY' }).
+  //   4. .h-captcha placeholder div WITHOUT data-sitekey but with a sitekey
+  //      somewhere in surrounding inline JS / data attributes — common when
+  //      the host SSRs the placeholder but injects the sitekey at runtime.
+  const hCapWithKey = $('.h-captcha[data-sitekey], div[data-sitekey][class*="h-captcha"]').first()
+  if (hCapWithKey.length) {
+    return { type: 'hcaptcha', siteKey: hCapWithKey.attr('data-sitekey') ?? null }
+  }
+  const hCapSrcMatch = scriptSrcs.match(
+    /js\.hcaptcha\.com\/1\/api\.js[^"'\s]*[?&](?:sitekey|render)=([\w-]+)/i,
+  )
+  if (hCapSrcMatch) {
+    return { type: 'hcaptcha', siteKey: hCapSrcMatch[1] ?? null }
+  }
+  const hCapInlineRender = scriptText.match(
+    /hcaptcha\.render\s*\([^)]*sitekey\s*[:=]\s*['"]([\w-]+)['"]/,
+  )
+  if (hCapInlineRender) {
+    return { type: 'hcaptcha', siteKey: hCapInlineRender[1] ?? null }
+  }
+  // Last-ditch: placeholder div present but no sitekey discoverable in the
+  // static snapshot. Surface as `siteKey: null` so the caller knows a captcha
+  // exists (and can decide to skip vs. force-browser) — better than missing
+  // it entirely.
+  const hCapPlaceholder = $('.h-captcha').first()
+  if (hCapPlaceholder.length) {
+    return { type: 'hcaptcha', siteKey: null }
   }
 
-  // Cloudflare Turnstile
+  // ── Cloudflare Turnstile ─────────────────────────────────────────────────
   const turn = $('.cf-turnstile[data-sitekey], div[data-sitekey][class*="cf-turnstile"]').first()
   if (turn.length) {
     return { type: 'turnstile', siteKey: turn.attr('data-sitekey') ?? null }
+  }
+  const turnInlineRender = scriptText.match(
+    /turnstile\.render\s*\([^)]*sitekey\s*[:=]\s*['"]([\w-]+)['"]/,
+  )
+  if (turnInlineRender) {
+    return { type: 'turnstile', siteKey: turnInlineRender[1] ?? null }
+  }
+  const turnPlaceholder = $('.cf-turnstile').first()
+  if (turnPlaceholder.length) {
+    return { type: 'turnstile', siteKey: null }
   }
 
   return null

@@ -199,8 +199,35 @@ export async function discoverDomain(domain, options = {}) {
     }
   }
 
-  // 5. Detect captcha (full-page HTML, since widgets often live outside the form)
-  const captcha = detectCaptcha(html)
+  // 5. Detect captcha (full-page HTML, since widgets often live outside the form).
+  //    If we see a placeholder div but no sitekey, the host is JS-injecting the
+  //    sitekey at runtime — common on hCaptcha-protected SvelteKit/React forms
+  //    and reCAPTCHA v3 sites. Re-fetch through Playwright once so the rendered
+  //    DOM exposes the sitekey. Without it, submissions silently fail server-
+  //    side because we never call 2Captcha.
+  let captcha = detectCaptcha(html)
+  if (captcha && !captcha.siteKey && !usedBrowser) {
+    logger.info(
+      { domain, contactUrl, captchaType: captcha.type },
+      '[discovery] captcha placeholder without sitekey — re-fetching via browser to extract',
+    )
+    const rendered = await fetchHtmlBrowser(contactUrl, { logger, fetchState })
+    if (rendered) {
+      const browserCaptcha = detectCaptcha(rendered)
+      if (browserCaptcha?.siteKey) {
+        captcha = browserCaptcha
+        logger.info(
+          { domain, contactUrl, captchaType: browserCaptcha.type },
+          '[discovery] captcha sitekey recovered via browser',
+        )
+      } else {
+        logger.warn(
+          { domain, contactUrl, captchaType: captcha.type },
+          '[discovery] captcha sitekey still missing after browser re-fetch — submissions will likely fail',
+        )
+      }
+    }
+  }
 
   // Inject submit_button into the mapping for the submission worker — Playwright
   // clicks this selector to fire the form. Heuristic and LLM both leave this
