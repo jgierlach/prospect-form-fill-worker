@@ -50,6 +50,34 @@ const BUILDER_SIGNATURES = [
     name: 'godaddy_websites',
     patterns: [/img1\.wsimg\.com/i, /<meta[^>]+name=["']generator["'][^>]+content=["']GoDaddy Website Builder/i],
   },
+  // WordPress sites are technically SSR but their form widgets (Elementor
+  // Pro, WPForms, Contact Form 7) are commonly JS-injected into a placeholder
+  // container — the static HTML has the widget shell (data-form-id /
+  // wpforms-container / wpcf7) but no `<form>` tag yet. Treating these as
+  // "SPA-like" so the crawler escalates to Playwright recovers the form.
+  // Sites that DO render the form server-side already match the form-shape
+  // check in fetchHtmlSmart and never need this escalation, so the cost is
+  // bounded to actually-needed cases.
+  {
+    name: 'elementor',
+    patterns: [
+      /<meta[^>]+name=["']generator["'][^>]+content=["']Elementor/i,
+      /data-elementor-type=["'][^"']+["']/i,
+      /class=["'][^"']*\belementor-form\b/i,
+    ],
+  },
+  {
+    name: 'wpforms',
+    patterns: [
+      /class=["'][^"']*\bwpforms-(?:container|form)\b/i,
+      /wpforms\.elementor\.com/i,
+      /id=["'][^"']*wpforms-form-/i,
+    ],
+  },
+  {
+    name: 'contact_form_7',
+    patterns: [/class=["'][^"']*\bwpcf7\b/i, /\/wp-content\/plugins\/contact-form-7\//i],
+  },
 ]
 
 /**

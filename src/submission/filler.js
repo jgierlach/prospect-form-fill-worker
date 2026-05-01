@@ -65,12 +65,48 @@ export async function fillForm({ page, fieldMapping, payload, logger = console }
       continue
     }
 
+    let visibilityTimedOut = false
     try {
       // Wait briefly for the element to be present (handles delayed-render forms).
       await locator.first().waitFor({ state: 'visible', timeout: 5000 })
     } catch {
-      logger.warn({ key, selector }, '[filler] element not visible within 5s; skipping')
-      skipped.push(key)
+      visibilityTimedOut = true
+    }
+
+    if (visibilityTimedOut) {
+      // Element exists but never became visible. Common pattern on Squarespace
+      // and some React forms where inputs hydrate at unpredictable times, or
+      // where a sibling field renders just slightly before the one we're on.
+      // Skip the click-and-type path (which auto-waits for visibility) and
+      // poke the value into the DOM directly + fire input/change events so
+      // the form's own state listeners pick it up.
+      const { count, ok } = await locator
+        .first()
+        .evaluate(
+          /** @param {HTMLInputElement | HTMLTextAreaElement} el @param {string} val */
+          (el, val) => {
+            try {
+              el.value = val
+              el.dispatchEvent(new Event('input', { bubbles: true }))
+              el.dispatchEvent(new Event('change', { bubbles: true }))
+              return { ok: true, count: 1 }
+            } catch {
+              return { ok: false, count: 0 }
+            }
+          },
+          value,
+        )
+        .catch(() => ({ ok: false, count: 0 }))
+      if (ok && count > 0) {
+        filled.push(key)
+        logger.info(
+          { key, selector },
+          '[filler] not-visible — set value via direct DOM dispatch',
+        )
+      } else {
+        logger.warn({ key, selector }, '[filler] element not visible within 5s and DOM dispatch failed; skipping')
+        skipped.push(key)
+      }
       continue
     }
 

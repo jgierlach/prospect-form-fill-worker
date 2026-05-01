@@ -60,6 +60,33 @@ function detectFormBuilder($, html) {
 }
 
 /**
+ * Walk a form's ancestor chain to detect inline-style or class-based hiding.
+ * Sites with multiple forms (e.g. WPForms hidden alongside a popup-modal
+ * form) score as high as the visible one because static HTML parsing can't
+ * see computed styles — but inline `style="display:none"` and well-known
+ * "hidden" class names are reachable. Forms living inside such containers
+ * are almost always the wrong target.
+ *
+ * @param {cheerio.CheerioAPI} $
+ * @param {cheerio.Element} formEl
+ * @returns {boolean}
+ */
+function isInsideHiddenContainer($, formEl) {
+  let $el = $(formEl)
+  for (let i = 0; i < 12 && $el.length && $el[0] && $el[0].tagName !== 'body'; i++) {
+    const style = ($el.attr('style') || '').toLowerCase().replace(/\s+/g, '')
+    if (/display:none/.test(style)) return true
+    if (/visibility:hidden/.test(style)) return true
+    const cls = ($el.attr('class') || '').toLowerCase()
+    if (/(^|\s)(hidden|d-none|invisible|sr-only|visually-hidden)(\s|$)/.test(cls)) return true
+    if ($el.attr('hidden') !== undefined) return true
+    if ($el.attr('aria-hidden') === 'true') return true
+    $el = $el.parent()
+  }
+  return false
+}
+
+/**
  * @param {cheerio.CheerioAPI} $
  * @param {cheerio.Element} formEl
  * @returns {number} score; -1 if explicitly excluded (newsletter), 0 if neutral
@@ -73,6 +100,11 @@ function scoreForm($, formEl) {
   if (NEWSLETTER_ACTION_HOSTS.test(action)) return -1
 
   let score = 0
+  // Forms hidden behind display:none / .hidden / aria-hidden almost always
+  // belong to widget machinery (lightboxes, alternate states) rather than
+  // the form a real visitor would interact with. Penalize hard so visible
+  // forms always win when both exist on the page.
+  if (isInsideHiddenContainer($, formEl)) score -= 4
 
   // Email is the strongest signal — every contact form has one. Match across
   // name, id, placeholder, aria-label, and autocomplete because builder-
@@ -137,9 +169,28 @@ function escapeAttr(value) {
 }
 
 /**
- * Conservative CSS identifier escape. Real spec covers more cases (digits,
- * leading hyphens, control chars) but the common case in form ids is letters,
- * numbers, hyphens, underscores. Anything else gets backslash-escaped.
+ * Build a Playwright/CSS selector for an `id` attribute. Prefers the bare
+ * `#id` form when the id is a valid CSS identifier; falls back to
+ * `[id="..."]` attribute syntax when the id has a leading digit, leading
+ * hyphen, or contains characters CSS doesn't allow without escaping. Duda
+ * (`id="1995151138"`) and similar builders emit purely-numeric ids that
+ * blow up Playwright's `#1995151138` parser as `not a valid selector` —
+ * the attribute form sidesteps the rules entirely.
+ *
+ * @param {string} id
+ */
+function buildIdSelector(id) {
+  if (/^[A-Za-z_][\w-]*$/.test(id)) {
+    return `#${id}`
+  }
+  return `[id="${String(id).replace(/[\\"]/g, '\\$&')}"]`
+}
+
+/**
+ * Conservative CSS identifier escape. Used by buildFormScope where we still
+ * want the `form#id` shorthand for readability when the id is plain. For
+ * field selectors prefer buildIdSelector, which falls back to attribute
+ * syntax when the id is unsafe.
  *
  * @param {string} value
  */
@@ -158,7 +209,12 @@ function cssEscapeIdent(value) {
 function buildFormScope($, formEl) {
   const $form = $(formEl)
   const id = $form.attr('id')
-  if (id) return `form#${cssEscapeIdent(id)}`
+  if (id) {
+    // Prefer the readable `form#id` shorthand when the id is a clean CSS
+    // identifier; fall back to attribute syntax for numeric / oddly-shaped ids.
+    if (/^[A-Za-z_][\w-]*$/.test(id)) return `form#${id}`
+    return `form[id="${escapeAttr(id)}"]`
+  }
   const action = $form.attr('action')
   if (action) return `form[action="${escapeAttr(action)}"]`
   // Fall back: assume the page's single form is ours. Less robust but a
@@ -179,6 +235,11 @@ function buildFieldSelector($, fieldEl, formScope) {
   const tag = (fieldEl.tagName || 'input').toLowerCase()
   const name = $field.attr('name')
   const id = $field.attr('id')
+  // GoDaddy Website Builder regenerates `id="input53420"` on every page render,
+  // so an id-anchored selector cached at discovery time won't match at submit
+  // time. The same builder emits a stable `data-aid="CONTACT_FORM_NAME"` /
+  // `…_EMAIL` / `…_PHONE` / `…_MESSAGE` attribute we can pin to instead.
+  const dataAid = $field.attr('data-aid')
 
   if (name) {
     const bare = `${tag}[name="${escapeAttr(name)}"]`
@@ -186,8 +247,14 @@ function buildFieldSelector($, fieldEl, formScope) {
     return `${formScope} ${bare}`
   }
 
+  if (dataAid) {
+    const bare = `${tag}[data-aid="${escapeAttr(dataAid)}"]`
+    if ($(bare).length === 1) return bare
+    return `${formScope} ${bare}`
+  }
+
   if (id) {
-    const bare = `#${cssEscapeIdent(id)}`
+    const bare = buildIdSelector(id)
     if ($(bare).length === 1) return bare
     return `${formScope} ${bare}`
   }
