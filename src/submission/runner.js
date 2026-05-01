@@ -12,13 +12,14 @@ import {
   setWebsiteStatus,
 } from '../queue/complete.js'
 import { logStep } from '../queue/log.js'
+import { discoverDomain, persistDiscovery } from '../discovery/runner.js'
 
 const SUBMISSION_CONCURRENCY = parseInt(process.env.SUBMISSION_CONCURRENCY || '3', 10)
-// Per-item budget. Has to comfortably fit: nav (~15s) + human-paced fill
-// (~30–60s for a typical message) + hCaptcha solve (up to ~180s) + submit
-// click + screenshots (~15s). 240s gives headroom; tune via env on busier
-// captcha days.
-const SUBMISSION_TIMEOUT_MS = parseInt(process.env.SUBMISSION_TIMEOUT_MS || '240000', 10)
+// Per-item budget. Has to comfortably fit auto-discovery on a fresh site
+// (~30–60s) + nav (~15s) + human-paced fill (~30–60s) + hCaptcha solve
+// (up to ~180s) + submit click + screenshots (~15s). 360s gives headroom
+// for that worst case; tune via env when working on a thinner queue.
+const SUBMISSION_TIMEOUT_MS = parseInt(process.env.SUBMISSION_TIMEOUT_MS || '360000', 10)
 const WORKER_ID_PREFIX = process.env.WORKER_ID_PREFIX || 'hetzner-prospect-fill'
 const WORKER_ID = `${WORKER_ID_PREFIX}-${os.hostname()}-${process.pid}`
 
@@ -59,15 +60,87 @@ async function processItem({ item, batch, supabase, logger }) {
   logger.info({ itemId: item.id, batchId: batch.id, dryRun: batch.dry_run }, '[runner] processing item')
 
   // 1. Load cache
-  const { data: cache, error: cacheErr } = await supabase
+  let { data: cache, error: cacheErr } = await supabase
     .from('prospect_form_cache')
     .select(
       'sourced_website_id, contact_url, field_mapping, submit_selector, form_builder, captcha_type, captcha_site_key, discovery_status',
     )
     .eq('sourced_website_id', item.sourced_website_id)
     .maybeSingle()
+  if (cacheErr) {
+    logger.warn({ itemId: item.id, err: cacheErr.message }, '[runner] cache lookup error')
+  }
 
-  if (cacheErr || !cache || cache.discovery_status !== 'success') {
+  // 1b. Auto-discover when cache is missing or hasn't completed yet. The
+  // admin's POST /batches inserts placeholder cache rows via
+  // ensureDiscoveryQueued (discovery_status='pending') but doesn't actually
+  // run discovery. Without this fallback every fresh-site item silently
+  // skips with `no_form_cache` even though discovery would have succeeded.
+  // We only auto-discover from the not-yet-attempted states (missing cache
+  // row, or status=null/pending). If a previous discovery already ran and
+  // failed, the operator should re-trigger explicitly via the admin
+  // "Re-run discovery" UI rather than burning batch time on every retry.
+  const needsAutoDiscovery = !cache || !cache.discovery_status || cache.discovery_status === 'pending'
+  if (needsAutoDiscovery) {
+    const { data: site } = await supabase
+      .from('sourced_websites')
+      .select('domain')
+      .eq('id', item.sourced_website_id)
+      .maybeSingle()
+    if (!site?.domain) {
+      logger.warn(
+        { itemId: item.id, sourcedWebsiteId: item.sourced_website_id },
+        '[runner] auto-discover skipped — sourced_website not found',
+      )
+    } else {
+      logger.info(
+        { itemId: item.id, domain: site.domain, cacheStatus: cache?.discovery_status ?? 'missing' },
+        '[runner] auto-discovering before submit',
+      )
+      const discoverStart = Date.now()
+      try {
+        const result = await discoverDomain(site.domain, {
+          sourcedWebsiteId: item.sourced_website_id,
+          supabase,
+          logger,
+        })
+        await persistDiscovery({
+          sourcedWebsiteId: item.sourced_website_id,
+          result,
+          supabase,
+          logger,
+        })
+        await logStep({
+          supabase,
+          itemId: item.id,
+          step: 'auto_discovered',
+          status: result.status === 'success' ? 'ok' : 'warn',
+          durationMs: Date.now() - discoverStart,
+          metadata: {
+            outcome: result.status,
+            failureReason: result.status === 'failed' ? result.failureReason : null,
+            contactUrl: 'contactUrl' in result ? result.contactUrl : null,
+          },
+        })
+        // Re-load cache so the rest of the flow sees the persisted result.
+        const { data: refreshed } = await supabase
+          .from('prospect_form_cache')
+          .select(
+            'sourced_website_id, contact_url, field_mapping, submit_selector, form_builder, captcha_type, captcha_site_key, discovery_status',
+          )
+          .eq('sourced_website_id', item.sourced_website_id)
+          .maybeSingle()
+        cache = refreshed
+      } catch (err) {
+        logger.warn(
+          { itemId: item.id, domain: site.domain, err: err instanceof Error ? err.message : String(err) },
+          '[runner] auto-discovery threw',
+        )
+      }
+    }
+  }
+
+  if (!cache || cache.discovery_status !== 'success') {
     logger.warn(
       { itemId: item.id, sourcedWebsiteId: item.sourced_website_id, status: cache?.discovery_status },
       '[runner] no usable form_cache; skipping',
